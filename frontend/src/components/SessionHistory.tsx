@@ -37,10 +37,9 @@ export default function SessionHistory({ repoId, onSelect }: Props) {
 
   useEffect(() => {
     if (!repoId || !open) return;
-    setFetchError(false);
     fetch(apiSessionsPath(repoId))
       .then((r) => { if (!r.ok) throw new Error(); return r.json(); })
-      .then(setSessions)
+      .then((data) => { setSessions(data); setFetchError(false); })
       .catch(() => { setSessions([]); setFetchError(true); });
   }, [repoId, open]);
 

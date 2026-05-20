@@ -124,7 +124,7 @@ export function useGitHistory(repoId: string): UseGitHistoryReturn {
     } finally {
       setDetailLoading(false);
     }
-  }, [base, showError]);
+  }, [repoId, showError]);
 
   const reset = useCallback(() => {
     setCommits([]);

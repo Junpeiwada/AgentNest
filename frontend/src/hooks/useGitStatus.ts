@@ -88,7 +88,7 @@ export function useGitStatus(repoId: string): UseGitStatusReturn {
     } finally {
       setDiffLoading(false);
     }
-  }, [base, showError]);
+  }, [repoId, showError]);
 
   const stageFiles = useCallback(async (files: string[]) => {
     try {
