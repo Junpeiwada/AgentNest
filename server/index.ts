@@ -1,4 +1,5 @@
 import "./config.js"; // Load .env before anything else
+import { CLAUDE_CLI_PATH } from "./config.js";
 import express from "express";
 import cors from "cors";
 import path from "path";
@@ -82,6 +83,16 @@ server.on("error", (err: NodeJS.ErrnoException) => {
 
 server.on("listening", () => {
   console.log(`AgentNest server running on http://0.0.0.0:${PORT}`);
+  // Claude Code CLI はユーザー環境のものを使う（SDK同梱バイナリは非同梱）。
+  // 未解決だと query() がCLI起動に失敗するため、起動時に明示する。
+  if (CLAUDE_CLI_PATH) {
+    console.log(`Claude Code CLI: ${CLAUDE_CLI_PATH}`);
+  } else {
+    console.error(
+      "警告: Claude Code CLI (`claude`) が見つかりません。チャットは動作しません。\n" +
+        "  公式インストーラで Claude Code を導入するか、環境変数 CLAUDE_CLI_PATH で実行ファイルのパスを指定してください。"
+    );
+  }
   if (typeof process.send === "function") {
     process.send({ type: "ready", port: PORT });
   }

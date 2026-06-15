@@ -3,7 +3,7 @@ import type { SDKMessage, SDKUserMessage, PermissionResult, ModelInfo, EffortLev
 import { randomUUID } from "crypto";
 import { appendFile, readdir, unlink, rename } from "fs/promises";
 import { join } from "path";
-import { BASE_DIR } from "../config.js";
+import { BASE_DIR, CLAUDE_CLI_PATH } from "../config.js";
 
 const LOG_DIR = join(import.meta.dirname, "../../logs");
 const LOG_RETENTION_DAYS = 10;
@@ -70,6 +70,8 @@ export async function prefetchModels(): Promise<void> {
         permissionMode: "default",
         systemPrompt: { type: "preset", preset: "claude_code" },
         settingSources: ["user", "project", "local"],
+        // ユーザー環境の Claude Code CLI を使う（SDK同梱バイナリは非同梱）
+        ...(CLAUDE_CLI_PATH ? { pathToClaudeCodeExecutable: CLAUDE_CLI_PATH } : {}),
       },
     });
     const models = await probe.supportedModels();
@@ -666,6 +668,8 @@ async function runQuery(
       permissionMode,
       systemPrompt: { type: "preset", preset: "claude_code" },
       settingSources: ["user", "project", "local"],
+      // ユーザー環境の Claude Code CLI を使う（SDK同梱バイナリは非同梱）
+      ...(CLAUDE_CLI_PATH ? { pathToClaudeCodeExecutable: CLAUDE_CLI_PATH } : {}),
       stderr: (data: string) => {
         log("STDERR", data);
         stderrBuffer.push(data);

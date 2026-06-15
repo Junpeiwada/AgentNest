@@ -45,6 +45,12 @@ writeFileSync(resolve(outDir, "package.json"), JSON.stringify({ type: "module" }
 const srcModules = resolve(root, "node_modules");
 const destModules = resolve(outDir, "node_modules");
 
+// SDK本体のみ同梱する。
+// 実行時に必要な Claude Code CLI（ネイティブ `claude` バイナリ）は Anthropic の
+// プロプライエタリ素材のため再頒布せず、アプリには同梱しない。
+// 代わりにユーザー環境にインストール済みの Claude Code CLI を
+// server/config.ts の resolveClaudeCliPath() で探索し、pathToClaudeCodeExecutable 経由で利用する。
+// これによりアプリ側はアーキ（x64/arm64）に依存しない。
 const packagesToCopy = [
   "@anthropic-ai/claude-agent-sdk",
   "@img/sharp-darwin-arm64",  // macOS ARM64向けsharp

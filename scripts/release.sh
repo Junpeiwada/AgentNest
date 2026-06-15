@@ -55,8 +55,9 @@ git commit -m "リリース: v${VERSION}"
 git tag "v${VERSION}"
 
 # 3. フロントエンド・サーバービルド → Tauriビルド（beforeBuildCommandで自動実行）
-echo "=== Tauriビルド（フロントエンド・サーバー含む）==="
-npx tauri build
+# Universal Binary（x86_64 + arm64）でビルドし、Intel/Apple Silicon両方で動作させる
+echo "=== Tauriビルド（Universal Binary、フロントエンド・サーバー含む）==="
+npx tauri build --target universal-apple-darwin
 
 # 5. git push（タグをリリース前にpush）
 echo "=== git push ==="
@@ -65,7 +66,7 @@ git push origin "v${VERSION}"
 
 # 6. GitHub Releasesへ公開
 echo "=== GitHub Releasesへ公開 ==="
-BUNDLE_DIR="src-tauri/target/release/bundle"
+BUNDLE_DIR="src-tauri/target/universal-apple-darwin/release/bundle"
 
 # リリース作成
 gh release create "v${VERSION}" \
