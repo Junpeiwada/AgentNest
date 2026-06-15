@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useLayoutEffect, useCallback, useRef } from "react";
 import {
   Box,
   List,
@@ -10,7 +10,7 @@ import {
   Breadcrumbs,
   Link,
 } from "@mui/material";
-import { useTheme } from "@mui/material/styles";
+import { useTheme, keyframes } from "@mui/material/styles";
 import FolderRoundedIcon from "@mui/icons-material/FolderRounded";
 import InsertDriveFileRoundedIcon from "@mui/icons-material/InsertDriveFileRounded";
 import ImageRoundedIcon from "@mui/icons-material/ImageRounded";
@@ -55,12 +55,121 @@ function formatSize(bytes: number): string {
 
 type ViewMode = "directory" | "file" | "loading" | "error";
 
+// パスごとのスクロール位置をセッション中保持する（タブを閉じるまで有効）
+const SCROLL_STORAGE_KEY = "fileExplorerScroll";
+// 保持するエントリ数の上限。超えたら古いものから破棄しsessionStorageの肥大化を防ぐ
+const SCROLL_MAX_ENTRIES = 50;
+
+function loadScrollPositions(): Record<string, number> {
+  try {
+    const raw = sessionStorage.getItem(SCROLL_STORAGE_KEY);
+    return raw ? JSON.parse(raw) : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveScrollPosition(key: string, top: number) {
+  try {
+    const positions = loadScrollPositions();
+    // 既存キーを末尾（最新）に詰め直すため一度削除してから入れ直す
+    delete positions[key];
+    positions[key] = top;
+    const keys = Object.keys(positions);
+    if (keys.length > SCROLL_MAX_ENTRIES) {
+      delete positions[keys[0]]; // 最も古いエントリを破棄（挿入順=LRU）
+    }
+    sessionStorage.setItem(SCROLL_STORAGE_KEY, JSON.stringify(positions));
+  } catch {
+    /* sessionStorageが使えない環境・容量超過時は無視 */
+  }
+}
+
+// 各ディレクトリで最後にタップしたエントリのpathを保持する。
+// 戻ってきたときにそのセルをiOS風にハイライト→フェードアウトさせるために使う。
+const LAST_TAP_STORAGE_KEY = "fileExplorerLastTap";
+
+function loadLastTaps(): Record<string, string> {
+  try {
+    const raw = sessionStorage.getItem(LAST_TAP_STORAGE_KEY);
+    return raw ? JSON.parse(raw) : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveLastTap(key: string, path: string) {
+  try {
+    const taps = loadLastTaps();
+    delete taps[key];
+    taps[key] = path;
+    const keys = Object.keys(taps);
+    if (keys.length > SCROLL_MAX_ENTRIES) {
+      delete taps[keys[0]];
+    }
+    sessionStorage.setItem(LAST_TAP_STORAGE_KEY, JSON.stringify(taps));
+  } catch {
+    /* 無視 */
+  }
+}
+
+// 一度ハイライトに使ったら消費してクリアする（再表示で繰り返さない）
+function consumeLastTap(key: string): string | null {
+  try {
+    const taps = loadLastTaps();
+    const path = taps[key];
+    if (path == null) return null;
+    delete taps[key];
+    sessionStorage.setItem(LAST_TAP_STORAGE_KEY, JSON.stringify(taps));
+    return path;
+  } catch {
+    return null;
+  }
+}
+
 export default function FileExplorer({ repoId, currentPath, onNavigate }: Props) {
   const theme = useTheme();
   const [entries, setEntries] = useState<FileEntry[]>([]);
   const [loading, setLoading] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>("loading");
   const [fetchError, setFetchError] = useState(false);
+  const listScrollRef = useRef<HTMLDivElement>(null);
+  const scrollKey = `${repoId}:${currentPath}`;
+  // スクロール中はメモリに最新値を保持し、sessionStorageへの書き込みはデバウンスする
+  const pendingScroll = useRef<{ key: string; top: number } | null>(null);
+  const flushTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // 戻ってきたときにiOS風ハイライト→フェードさせる対象のentry path。
+  // 対象セルに@keyframesアニメ（最初から色が載っていてフェードアウトするだけ）を当てる。
+  const [highlightPath, setHighlightPath] = useState<string | null>(null);
+  const highlightTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // 保留中のスクロール位置を即座にsessionStorageへ書き出す
+  const flushScroll = useCallback(() => {
+    if (flushTimer.current) {
+      clearTimeout(flushTimer.current);
+      flushTimer.current = null;
+    }
+    const pending = pendingScroll.current;
+    if (pending) {
+      saveScrollPosition(pending.key, pending.top);
+      pendingScroll.current = null;
+    }
+  }, []);
+
+  const handleScroll = useCallback(
+    (e: React.UIEvent<HTMLDivElement>) => {
+      pendingScroll.current = { key: scrollKey, top: e.currentTarget.scrollTop };
+      if (flushTimer.current) return;
+      flushTimer.current = setTimeout(() => {
+        flushTimer.current = null;
+        flushScroll();
+      }, 200);
+    },
+    [scrollKey, flushScroll],
+  );
+
+  // アンマウント時に保留分を書き出す
+  useEffect(() => () => flushScroll(), [flushScroll]);
 
   // currentPathがディレクトリかファイルかを判定しつつデータを取得
   const fetchPath = useCallback(async (pathStr: string) => {
@@ -100,7 +209,51 @@ export default function FileExplorer({ repoId, currentPath, onNavigate }: Props)
     if (repoId) fetchPath(currentPath);
   }, [repoId, currentPath, fetchPath]);
 
+  // ディレクトリ表示が確定したら、描画反映前（レイアウト確定時）にスクロール位置を復元する。
+  // scrollKey単位で復元するため依存はscrollKey/viewMode/loadingに絞る（entriesでの再復元を避ける）。
+  useLayoutEffect(() => {
+    if (viewMode !== "directory" || loading) return;
+    const el = listScrollRef.current;
+    if (!el) return;
+    const saved = loadScrollPositions()[scrollKey];
+    if (saved != null) el.scrollTop = saved;
+  }, [viewMode, loading, scrollKey]);
+
+  // 戻ってきてこのディレクトリの一覧が出揃ったら、最後にタップしたセルを
+  // iOS風に一瞬ハイライトしてフェードアウトさせる（消費したら記録はクリア）。
+  // 「いま表示しているディレクトリ（currentPath）」を基準に発火する。子へ進む際に
+  // 記録するキーは"進む前のディレクトリ"なので、子表示中にそのキーを覗いても一致せず、
+  // 親へ戻ったときに初めて一致して発火する。
+  useEffect(() => {
+    // ディレクトリの中身が確定したタイミングでのみ判定する。
+    // entriesに対象pathが含まれること=「いま表示中のディレクトリの中身」である保証になり、
+    // 子へ進む途中の中間レンダー（entriesがまだ親/未確定）では消費されない。
+    if (viewMode !== "directory" || loading) return;
+    const tapped = loadLastTaps()[scrollKey];
+    if (tapped == null || !entries.some((e) => e.path === tapped)) return;
+    // ここで初めて消費（削除）する。発火が確定した瞬間だけなので早期消費は起きない。
+    consumeLastTap(scrollKey);
+    setHighlightPath(tapped);
+    if (highlightTimer.current) clearTimeout(highlightTimer.current);
+    // アニメ完了後に対象を片付ける（再描画でanimationが再発火しないように）
+    highlightTimer.current = setTimeout(() => {
+      setHighlightPath(null);
+      highlightTimer.current = null;
+    }, 1100);
+  }, [viewMode, loading, scrollKey, entries]);
+
+  // アンマウント時にハイライト用タイマーを掃除する
+  useEffect(() => () => {
+    if (highlightTimer.current) clearTimeout(highlightTimer.current);
+  }, []);
+
   const handleEntryClick = (entry: FileEntry) => {
+    // 移動前に現在のスクロール位置を確実に書き出しておく
+    const el = listScrollRef.current;
+    if (el) pendingScroll.current = { key: scrollKey, top: el.scrollTop };
+    flushScroll();
+    // 戻ってきたときのハイライト用にタップ位置を記録する（ディレクトリ・ファイルどちらも）
+    saveLastTap(scrollKey, entry.path);
     onNavigate(entry.path);
   };
 
@@ -179,7 +332,11 @@ export default function FileExplorer({ repoId, currentPath, onNavigate }: Props)
       </Box>
 
       {/* File List */}
-      <Box sx={{ flex: 1, overflow: "auto", overscrollBehavior: "contain", WebkitOverflowScrolling: "touch" }}>
+      <Box
+        ref={listScrollRef}
+        onScroll={handleScroll}
+        sx={{ flex: 1, overflow: "auto", overscrollBehavior: "contain", WebkitOverflowScrolling: "touch" }}
+      >
         {loading ? (
           <Box sx={{ display: "flex", justifyContent: "center", py: 4 }}>
             <CircularProgress size={28} sx={{ color: theme.palette.accent.main }} />
@@ -192,7 +349,9 @@ export default function FileExplorer({ repoId, currentPath, onNavigate }: Props)
           </Box>
         ) : (
           <List disablePadding>
-            {entries.map((entry) => (
+            {entries.map((entry) => {
+              const isHighlighted = highlightPath === entry.path;
+              return (
               <ListItemButton
                 key={entry.path}
                 onClick={() => handleEntryClick(entry)}
@@ -200,6 +359,14 @@ export default function FileExplorer({ repoId, currentPath, onNavigate }: Props)
                   py: { xs: 1.25, sm: 0.75 },
                   px: { xs: 1.5, sm: 2 },
                   borderBottom: `1px solid ${t.palette.border}`,
+                  // 戻ってきた直後の対象セルだけ、最初からaccent色が載った状態でフェードアウトする
+                  // （keyframesなのでフェードインせず、iOSのタップ解除のように消えていく）
+                  ...(isHighlighted && {
+                    animation: `${keyframes`
+                      from { background-color: ${t.palette.accent.soft}; }
+                      to { background-color: transparent; }
+                    `} 1000ms ease-out forwards`,
+                  }),
                   "&:hover": { bgcolor: t.palette.accent.soft },
                   "&:active": { bgcolor: t.palette.bgSecondary },
                 })}
@@ -225,7 +392,8 @@ export default function FileExplorer({ repoId, currentPath, onNavigate }: Props)
                   <ChevronRightRoundedIcon sx={{ fontSize: 18, color: theme.palette.textTertiary }} />
                 )}
               </ListItemButton>
-            ))}
+              );
+            })}
           </List>
         )}
       </Box>
