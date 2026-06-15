@@ -2,7 +2,14 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-開発に関する詳細な仕様・設計・ガイドは `Docs/` 配下を参照。
+開発に関する詳細な仕様・設計・ガイドは `Docs/` 配下を参照。主要なもの:
+
+- [Docs/仕様-AgentNest全体.md](Docs/仕様-AgentNest全体.md) — 全体仕様
+- [Docs/仕様-Gitタブ.md](Docs/仕様-Gitタブ.md) — Gitタブ（`/git` ルート、`server/routes/git.ts`）
+- [Docs/仕様-モデル選択.md](Docs/仕様-モデル選択.md) — モデル選択（`server/routes/models.ts`、起動時に `supportedModels()` で取得しキャッシュ）
+- [Docs/仕様-実行モード選択.md](Docs/仕様-実行モード選択.md) — 実行モード選択（`ModeSelector.tsx`）
+- [Docs/設計-URL.md](Docs/設計-URL.md) / [Docs/設計-画面.md](Docs/設計-画面.md) — URL・画面設計
+- [Docs/ガイド-テスト.md](Docs/ガイド-テスト.md) / [Docs/ガイド-運用.md](Docs/ガイド-運用.md) — テスト・運用ガイド
 
 `Docs/` の各Markdownの見出しを変更したら、[Tools/GenDocsToc/gen_toc.py](Tools/GenDocsToc/gen_toc.py) で目次を再生成する（冪等）:
 
@@ -102,12 +109,13 @@ AgentNest/
 │   ├── claude/
 │   │   ├── executor.ts        # 中核。SDK query()ラッパー、SSE送信、セッション管理、権限フロー
 │   │   └── commandExpander.ts # .claude/commands/ スラッシュコマンド展開
-│   └── routes/       # chat, repos, sessions, files, permission, reconnect, status
+│   └── routes/       # chat, repos, sessions, files, permission, reconnect, status, git, models
 ├── frontend/         # React SPA
 │   └── src/
 │       ├── hooks/useChat.ts   # SSEストリーム処理・再接続。フロントエンドの中核
-│       ├── components/        # Chat, MessageList, MessageInput, PermissionDialog 等
-│       ├── pages/             # ChatPlaceholder, FilesPage, RepoRedirect
+│       ├── hooks/             # useGitStatus, useGitHistory, useWakeLock 等
+│       ├── components/        # Chat, MessageList, MessageInput, PermissionDialog, ModeSelector, SettingsPanel 等
+│       ├── pages/             # ChatPlaceholder, FilesPage, GitPage, RepoRedirect
 │       ├── layouts/           # RootLayout, MinimalLayout
 │       └── router.tsx         # React Router v7
 ├── src-tauri/        # Tauriデスクトップアプリ（Rust）
@@ -124,7 +132,8 @@ AgentNest/
   ├── /chat            # チャット画面
   ├── /chat/:sessionId # セッション復元
   ├── /files           # ファイルブラウザ
-  └── /files/*         # ネストされたファイルパス
+  ├── /files/*         # ネストされたファイルパス
+  └── /git             # Gitタブ（status / 履歴）
 ```
 
 ### 主要な通信フロー
