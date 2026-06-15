@@ -42,9 +42,15 @@ Tailscale などの VPN 経由でアクセスすれば、ポートをインタ�
 
 ## インストール
 
+### 前提: Claude Code CLI のインストール
+
+AgentNest は Claude Code CLI（`claude`）を**同梱していません**。実行時にユーザー環境の `claude` を利用するため、事前にインストールしておく必要があります（未インストールだとチャットが動作しません）。
+
+[公式インストール手順](https://docs.claude.com/en/docs/claude-code/setup) に従って導入してください。`~/.local/bin/claude`・Homebrew（`/opt/homebrew/bin`・`/usr/local/bin`）・`PATH` 上の `claude` を自動探索します。別の場所にある場合は `.env` の `CLAUDE_CLI_PATH` で実行ファイルのパスを明示できます。
+
 ### GitHub Releases からインストール（macOS）
 
-[Releases](https://github.com/Junpeiwada/AgentNest/releases) から DMG をダウンロードしてインストールできます。
+[Releases](https://github.com/Junpeiwada/AgentNest/releases) から DMG をダウンロードしてインストールできます。**ユニバーサルバイナリ**のため、Apple Silicon・Intel どちらの Mac でも動作します。
 
 Apple Developer 署名がないため、初回起動時に「壊れている」と表示されます。以下のコマンドで解除してください：
 
