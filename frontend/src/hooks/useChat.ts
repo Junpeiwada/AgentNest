@@ -1,4 +1,19 @@
 import { useState, useCallback, useRef, useEffect } from "react";
+import {
+  DEFAULT_MODEL_VALUE,
+  LS_MODEL_KEY,
+  LS_EFFORT_KEY,
+  findModel,
+  normalizeEffort,
+  type EffortLevel,
+  type ModelInfo,
+} from "../lib/modelSettings";
+import {
+  LS_PERMISSION_MODE_KEY,
+  LS_LEGACY_AUTO_EDIT_KEYS,
+  normalizePermissionMode,
+  type PermissionMode,
+} from "../lib/permissionMode";
 
 export interface StructuredPatchHunk {
   oldStart: number;
@@ -157,6 +172,102 @@ export function useChat(
   const abortRef = useRef<AbortController | null>(null);
   const sessionIdRef = useRef<string | null>(initialSessionId ?? null);
   const forceFreshSessionRef = useRef(false);
+
+  // --- モデル / Thinking effort 選択（Docs/仕様-モデル選択.md）---
+  const [models, setModels] = useState<ModelInfo[]>([]);
+  const [selectedModel, setSelectedModelState] = useState<string>(
+    () => localStorage.getItem(LS_MODEL_KEY) ?? DEFAULT_MODEL_VALUE
+  );
+  const [selectedEffort, setSelectedEffortState] = useState<EffortLevel | null>(
+    () => (localStorage.getItem(LS_EFFORT_KEY) as EffortLevel | null) ?? null
+  );
+  // 実行モード（permissionMode）。保存値を正規化して復元。
+  const [permissionMode, setPermissionModeState] = useState<PermissionMode>(
+    () => normalizePermissionMode(localStorage.getItem(LS_PERMISSION_MODE_KEY))
+  );
+  // 最新値を sendMessage / setSelectedModel から参照するための ref
+  const selectedModelRef = useRef(selectedModel);
+  const selectedEffortRef = useRef(selectedEffort);
+  const permissionModeRef = useRef(permissionMode);
+  const modelsRef = useRef(models);
+  useEffect(() => { selectedModelRef.current = selectedModel; }, [selectedModel]);
+  useEffect(() => { selectedEffortRef.current = selectedEffort; }, [selectedEffort]);
+  useEffect(() => { permissionModeRef.current = permissionMode; }, [permissionMode]);
+  useEffect(() => { modelsRef.current = models; }, [models]);
+
+  // 旧「Auto Edit」トグルの localStorage キーを掃除（permissionMode へ移行済みの死にデータ）
+  useEffect(() => {
+    for (const key of LS_LEGACY_AUTO_EDIT_KEYS) localStorage.removeItem(key);
+  }, []);
+
+  // モデル一覧を取得し、保存済み選択値を検証・正規化する。
+  // サーバ起動直後は prefetch 未完了で空配列が返るため、空なら有限回リトライする。
+  useEffect(() => {
+    let cancelled = false;
+    const RETRY_DELAYS_MS = [1000, 2000, 4000]; // 空一覧だった場合の再試行間隔
+
+    // 一覧取得を1回試みる。成功（非空）したら true、空なら false。
+    const fetchOnce = async (): Promise<boolean> => {
+      const res = await fetch("/api/models");
+      if (!res.ok) return false;
+      const data = await res.json();
+      const list: ModelInfo[] = Array.isArray(data.models) ? data.models : [];
+      if (cancelled) return true; // 中断時はリトライ不要
+      if (list.length === 0) return false; // prefetch未完了 → リトライ対象
+      setModels(list);
+      // 復元値の検証: 実モデルが現一覧に無ければ「おまかせ」へフォールバック
+      const restored = localStorage.getItem(LS_MODEL_KEY) ?? DEFAULT_MODEL_VALUE;
+      const model = findModel(list, restored);
+      const nextModel = model ? restored : DEFAULT_MODEL_VALUE;
+      const nextModelInfo = model ?? findModel(list, DEFAULT_MODEL_VALUE);
+      const restoredEffort = (localStorage.getItem(LS_EFFORT_KEY) as EffortLevel | null) ?? null;
+      const nextEffort = normalizeEffort(nextModelInfo, restoredEffort); // 起動時復元直後も正規化
+      setSelectedModelState(nextModel);
+      setSelectedEffortState(nextEffort);
+      localStorage.setItem(LS_MODEL_KEY, nextModel);
+      if (nextEffort) localStorage.setItem(LS_EFFORT_KEY, nextEffort);
+      else localStorage.removeItem(LS_EFFORT_KEY);
+      return true;
+    };
+
+    (async () => {
+      try {
+        if (await fetchOnce()) return;
+        for (const delay of RETRY_DELAYS_MS) {
+          await new Promise((r) => setTimeout(r, delay));
+          if (cancelled) return;
+          if (await fetchOnce()) return;
+        }
+      } catch { /* 取得失敗時は空一覧のまま縮退（おまかせのみ） */ }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  // モデル選択（切替時に effort を正規化して永続化）
+  // models は ref 経由で常に最新を参照する（クロージャに古い空配列を閉じ込めない）
+  const setSelectedModel = useCallback((value: string) => {
+    setSelectedModelState(value);
+    localStorage.setItem(LS_MODEL_KEY, value);
+    setSelectedEffortState((prevEffort) => {
+      const model = findModel(modelsRef.current, value);
+      const next = normalizeEffort(model, prevEffort);
+      if (next) localStorage.setItem(LS_EFFORT_KEY, next);
+      else localStorage.removeItem(LS_EFFORT_KEY);
+      return next;
+    });
+  }, []);
+
+  // effort選択（永続化）
+  const setSelectedEffort = useCallback((effort: EffortLevel) => {
+    setSelectedEffortState(effort);
+    localStorage.setItem(LS_EFFORT_KEY, effort);
+  }, []);
+
+  // 実行モード選択（永続化）
+  const setPermissionMode = useCallback((mode: PermissionMode) => {
+    setPermissionModeState(mode);
+    localStorage.setItem(LS_PERMISSION_MODE_KEY, mode);
+  }, []);
 
   useEffect(() => {
     sessionIdRef.current = sessionId;
@@ -354,7 +465,6 @@ export function useChat(
     async (
       message: string,
       repoId: string,
-      autoEdit: boolean = true,
       images?: ImageAttachment[],
       sessionIdOverride?: string | null,
     ) => {
@@ -386,6 +496,12 @@ export function useChat(
           ? null
           : sessionIdRef.current;
       forceFreshSessionRef.current = false;
+
+      // モデル/effort: default も含めて常に明示送信（案2）
+      const apiModel = selectedModelRef.current;
+      const apiEffort = selectedEffortRef.current ?? undefined;
+      // 実行モード（permissionMode）も常に明示送信
+      const apiPermissionMode = permissionModeRef.current;
 
       let receivedDone = false;
       let receivedError = false;
@@ -443,7 +559,7 @@ export function useChat(
         const res = await fetch("/api/chat", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ message, repoId, sessionId: requestSessionId, autoEdit, images: apiImages }),
+          body: JSON.stringify({ message, repoId, sessionId: requestSessionId, permissionMode: apiPermissionMode, images: apiImages, model: apiModel, effort: apiEffort }),
           signal: controller.signal,
         });
 
@@ -591,5 +707,14 @@ export function useChat(
     respondQuestion,
     resetSession,
     stopGeneration,
+    // モデル / Thinking effort 選択
+    models,
+    selectedModel,
+    selectedEffort,
+    setSelectedModel,
+    setSelectedEffort,
+    // 実行モード（permissionMode）選択
+    permissionMode,
+    setPermissionMode,
   };
 }
