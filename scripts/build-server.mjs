@@ -53,8 +53,6 @@ const destModules = resolve(outDir, "node_modules");
 // これによりアプリ側はアーキ（x64/arm64）に依存しない。
 const packagesToCopy = [
   "@anthropic-ai/claude-agent-sdk",
-  "@img/sharp-darwin-arm64",  // macOS ARM64向けsharp
-  "@img/sharp-darwin-x64",    // macOS x64向けsharp
 ];
 
 for (const pkg of packagesToCopy) {
