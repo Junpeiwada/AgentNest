@@ -4,6 +4,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 開発に関する詳細な仕様・設計・ガイドは `Docs/` 配下を参照。
 
+`Docs/` の各Markdownの見出しを変更したら、[Tools/GenDocsToc/gen_toc.py](Tools/GenDocsToc/gen_toc.py) で目次を再生成する（冪等）:
+
+```bash
+Tools/.venv/bin/python Tools/GenDocsToc/gen_toc.py Docs/*.md
+```
+
 ## 重大なルール
 
 ### テスト修正の禁止（確認必須）

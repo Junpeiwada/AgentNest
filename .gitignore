@@ -13,3 +13,8 @@ src-tauri/target/
 src-tauri/gen/
 build/icon.iconset/
 build/icon.svg
+
+# Python（Tools/ 配下のスクリプト用）
+__pycache__/
+*.py[cod]
+.venv/

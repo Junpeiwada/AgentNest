@@ -1,5 +1,31 @@
 # AgentNest 仕様書
 
+---
+
+## 目次
+
+- [概要](#概要)
+  - [想定ユースケース](#想定ユースケース)
+  - [利用環境](#利用環境)
+- [画面構成](#画面構成)
+  - [UI 要件](#ui-要件)
+- [運用制約](#運用制約)
+  - [シングルセッション制](#シングルセッション制)
+- [バックエンド API](#バックエンド-api)
+  - [`POST /api/chat`](#post-apichat)
+  - [`POST /api/permission`](#post-apipermission)
+  - [`GET /api/repos`](#get-apirepos)
+  - [`GET /api/status`](#get-apistatus)
+- [設定](#設定)
+  - [ベースディレクトリ](#ベースディレクトリ)
+- [Claude Agent SDK 連携](#claude-agent-sdk-連携)
+  - [基本呼び出し](#基本呼び出し)
+  - [動作](#動作)
+- [今後の拡張候補](#今後の拡張候補)
+
+---
+
+
 ## 概要
 
 AgentNest は、ブラウザから Claude Code を操作する汎用 Web インターフェース。
