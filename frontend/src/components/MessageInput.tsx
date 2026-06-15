@@ -1,10 +1,20 @@
 import { useState, useRef, useCallback, useEffect } from "react";
-import { Box, IconButton, InputBase } from "@mui/material";
+import { Box, IconButton, InputBase, Typography } from "@mui/material";
 import ArrowUpwardRoundedIcon from "@mui/icons-material/ArrowUpwardRounded";
 import StopRoundedIcon from "@mui/icons-material/StopRounded";
 import ImageRoundedIcon from "@mui/icons-material/ImageRounded";
 import CloseRoundedIcon from "@mui/icons-material/CloseRounded";
+import TuneRoundedIcon from "@mui/icons-material/TuneRounded";
+import KeyboardArrowUpRoundedIcon from "@mui/icons-material/KeyboardArrowUpRounded";
 import type { ImageAttachment } from "../hooks/useChat";
+import SettingsPanel from "./SettingsPanel";
+import ModeSelector from "./ModeSelector";
+import {
+  buildToggleBarLabel,
+  type EffortLevel,
+  type ModelInfo,
+} from "../lib/modelSettings";
+import type { PermissionMode } from "../lib/permissionMode";
 
 interface Props {
   onSend: (message: string, images?: ImageAttachment[]) => void;
@@ -12,6 +22,15 @@ interface Props {
   disabled: boolean;
   isLoading: boolean;
   visible?: boolean;
+  // モデル / Thinking effort 選択
+  models: ModelInfo[];
+  selectedModel: string;
+  selectedEffort: EffortLevel | null;
+  onSelectModel: (value: string) => void;
+  onSelectEffort: (effort: EffortLevel) => void;
+  // 実行モード（permissionMode）選択
+  permissionMode: PermissionMode;
+  onSelectMode: (mode: PermissionMode) => void;
 }
 
 const ACCEPTED_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp"];
@@ -34,12 +53,32 @@ function parseDataUrl(dataUrl: string): { data: string; mediaType: string } {
 
 const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
 
-export default function MessageInput({ onSend, onStop, disabled, isLoading, visible }: Props) {
+export default function MessageInput({
+  onSend,
+  onStop,
+  disabled,
+  isLoading,
+  visible,
+  models,
+  selectedModel,
+  selectedEffort,
+  onSelectModel,
+  onSelectEffort,
+  permissionMode,
+  onSelectMode,
+}: Props) {
   const [text, setText] = useState("");
   const [images, setImages] = useState<ImageAttachment[]>([]);
   const [isInputFocused, setIsInputFocused] = useState(false);
+  const [panelOpen, setPanelOpen] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const toggleBarLabel = buildToggleBarLabel(
+    models,
+    selectedModel,
+    selectedEffort
+  );
 
   // チャットタブが表示されたときにテキストボックスにフォーカス
   useEffect(() => {
@@ -128,6 +167,70 @@ export default function MessageInput({ onSend, onStop, disabled, isLoading, visi
 
   return (
     <Box>
+      {/* 設定パネル（トグルで開閉） */}
+      {panelOpen && (
+        <SettingsPanel
+          models={models}
+          selectedModel={selectedModel}
+          selectedEffort={selectedEffort}
+          onSelectModel={onSelectModel}
+          onSelectEffort={onSelectEffort}
+        />
+      )}
+
+      {/* ツールバー行: 左=モデル/effortトグルバー（伸縮）, 右=実行モードボタン */}
+      <Box sx={{ display: "flex", alignItems: "stretch", gap: 0.75, mb: 0.75 }}>
+        {/* トグルバー（常時表示）: 現在の選択値を1行表示し、タップでパネル開閉 */}
+        <Box
+          component="button"
+          onClick={() => setPanelOpen((v) => !v)}
+          sx={(theme) => ({
+            display: "flex",
+            alignItems: "center",
+            gap: 0.75,
+            flex: 1,
+            minWidth: 0,
+            minHeight: 36,
+            px: 1.25,
+            py: 0.5,
+            bgcolor: "background.paper",
+            border: `1px solid ${theme.palette.border}`,
+            borderRadius: "var(--radius-sm)",
+            cursor: "pointer",
+            color: theme.palette.text.secondary,
+            transition: "background-color 0.15s ease, border-color 0.15s ease",
+            "&:hover": { bgcolor: theme.palette.bgSecondary },
+          })}
+        >
+          <TuneRoundedIcon sx={{ fontSize: 16, flexShrink: 0 }} />
+          <Typography
+            sx={{
+              fontSize: "12.5px",
+              fontWeight: 500,
+              flex: 1,
+              minWidth: 0,
+              textAlign: "left",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+            }}
+          >
+            {toggleBarLabel}
+          </Typography>
+          <KeyboardArrowUpRoundedIcon
+            sx={{
+              fontSize: 18,
+              flexShrink: 0,
+              transition: "transform 0.2s ease",
+              transform: panelOpen ? "rotate(0deg)" : "rotate(180deg)",
+            }}
+          />
+        </Box>
+
+        {/* 実行モードボタン（ポップオーバーで一覧表示） */}
+        <ModeSelector mode={permissionMode} onSelectMode={onSelectMode} />
+      </Box>
+
       {/* Image previews */}
       {images.length > 0 && (
         <Box

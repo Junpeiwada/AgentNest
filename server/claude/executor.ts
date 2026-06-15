@@ -1,8 +1,9 @@
 import { query } from "@anthropic-ai/claude-agent-sdk";
-import type { SDKMessage, SDKUserMessage, PermissionResult } from "@anthropic-ai/claude-agent-sdk";
+import type { SDKMessage, SDKUserMessage, PermissionResult, ModelInfo, EffortLevel } from "@anthropic-ai/claude-agent-sdk";
 import { randomUUID } from "crypto";
 import { appendFile, readdir, unlink, rename } from "fs/promises";
 import { join } from "path";
+import { BASE_DIR } from "../config.js";
 
 const LOG_DIR = join(import.meta.dirname, "../../logs");
 const LOG_RETENTION_DAYS = 10;
@@ -37,6 +38,50 @@ export function log(label: string, data: unknown): void {
   const ts = new Date().toISOString();
   const line = `[${ts}] ${label}: ${typeof data === "string" ? data : JSON.stringify(data, null, 2)}\n`;
   appendFile(getLogFile(), line).catch(() => {});
+}
+
+// モデル一覧キャッシュ（サーバ起動時に1回だけ取得し、GET /api/models はこれを返すだけにする）
+let cachedModels: ModelInfo[] = [];
+let modelsPrefetched = false;
+
+/** キャッシュ済みモデル一覧を返す。未取得・取得失敗時は空配列。 */
+export function getCachedModels(): ModelInfo[] {
+  return cachedModels;
+}
+
+/**
+ * モデル一覧をプリフェッチしてメモリにキャッシュする。
+ * 使い捨ての query() を起動し supportedModels() を呼ぶ（チャット用の currentSession/currentStream には触れない）。
+ * supportedModels() はサブプロセス初期化時のメタ情報取得であり、空プロンプトでもLLM推論は発火しない。
+ * 成功するまでは modelsPrefetched を立てないため、起動時にCLI未準備でも GET /api/models 経由で自動回復できる。
+ * 失敗してもサーバは正常動作させる（空配列のまま縮退）。
+ */
+export async function prefetchModels(): Promise<void> {
+  if (modelsPrefetched) return;
+  // 非ストリーミング入力では interrupt() が効かないため、AbortController で確実に停止する
+  const ac = new AbortController();
+  try {
+    const probe = query({
+      // 空プロンプトでサブプロセスを起動し、メタ情報だけ取得して即破棄する
+      prompt: "",
+      options: {
+        cwd: BASE_DIR,
+        abortController: ac,
+        permissionMode: "default",
+        systemPrompt: { type: "preset", preset: "claude_code" },
+        settingSources: ["user", "project", "local"],
+      },
+    });
+    const models = await probe.supportedModels();
+    cachedModels = Array.isArray(models) ? models : [];
+    modelsPrefetched = true; // 成功時のみ確定。失敗時は未取得のまま再試行を許す
+    log("MODELS_PREFETCH", { count: cachedModels.length, values: cachedModels.map((m) => m.value) });
+  } catch (err: any) {
+    cachedModels = [];
+    log("MODELS_PREFETCH_ERROR", { name: err?.name, message: err?.message });
+  } finally {
+    ac.abort(); // サブプロセスを確実に終了させる
+  }
 }
 
 export interface PendingPermission {
@@ -269,14 +314,69 @@ export interface ChatCallbacks {
   onError: (error: string) => void;
 }
 
+export interface ModelOptions {
+  // 「おまかせ」は supportedModels() が先頭に返す value:"default" を指す。
+  // SDKはこの "default" を有効なモデル識別子として受理するため、特別扱いせず明示送信する。
+  // 一覧に無い未知値のときのみ undefined（CLI既定に委譲）。
+  model?: string;
+  effort?: EffortLevel; // model非対応・対応段階外のときは undefined
+}
+
+const EFFORT_LEVELS: readonly EffortLevel[] = ["low", "medium", "high", "xhigh", "max"];
+
+// UIに載せる実行モード（SDK PermissionModeのサブセット）。
+// bypassPermissions / dontAsk は事故リスクのため受理しない。
+export type PermissionMode = "default" | "acceptEdits" | "auto" | "plan";
+const PERMISSION_MODES: readonly PermissionMode[] = ["default", "acceptEdits", "auto", "plan"];
+const DEFAULT_PERMISSION_MODE: PermissionMode = "acceptEdits";
+
+/**
+ * 外部入力の permissionMode をサーバ側の信頼境界で検証・正規化する。
+ * 対象4モード外（bypassPermissions等を含む未知値）は既定の acceptEdits へ。
+ */
+export function sanitizePermissionMode(input: unknown): PermissionMode {
+  if (typeof input === "string" && PERMISSION_MODES.includes(input as PermissionMode)) {
+    return input as PermissionMode;
+  }
+  return DEFAULT_PERMISSION_MODE;
+}
+
+/**
+ * 外部入力（リクエストボディ）の model/effort をサーバ側の信頼境界で検証・正規化する。
+ * - model: キャッシュ済み一覧に存在しない値は捨てる（CLI既定に委譲）。
+ *   "default" も一覧に含まれる正規エントリなので、そのまま通して明示送信する。
+ * - effort: そのモデルが対応する段階に含まれなければ捨てる（モデル能力との不整合を防ぐ）
+ * フロントの正規化はUX用であり、ここが最終的な防御線。
+ */
+export function sanitizeModelOptions(input: unknown): ModelOptions {
+  if (!input || typeof input !== "object") return {};
+  const { model, effort } = input as { model?: unknown; effort?: unknown };
+
+  const known = getCachedModels();
+  const matched =
+    typeof model === "string" ? known.find((m) => m.value === model) : undefined;
+  if (!matched) return {}; // 未知モデル（一覧未取得含む）はCLI既定へ委譲
+
+  const result: ModelOptions = { model: matched.value };
+
+  if (typeof effort === "string" && EFFORT_LEVELS.includes(effort as EffortLevel)) {
+    const levels = matched.supportedEffortLevels ?? [];
+    if (matched.supportsEffort !== false && levels.includes(effort as EffortLevel)) {
+      result.effort = effort as EffortLevel;
+    }
+  }
+  return result;
+}
+
 export async function executeChat(
   message: string,
   repoId: string,
   repoPath: string,
   resumeSessionId: string | null,
-  autoEdit: boolean,
+  permissionMode: PermissionMode,
   callbacks: ChatCallbacks,
-  images?: ImageData[]
+  images?: ImageData[],
+  modelOptions?: ModelOptions
 ): Promise<void> {
   // Abort any existing session
   abortCurrentSession();
@@ -381,7 +481,7 @@ export async function executeChat(
   };
 
   try {
-    await runQuery(message, repoPath, abortController, resumeSessionId, autoEdit, session, wrappedCallbacks, stderrBuffer, images);
+    await runQuery(message, repoPath, abortController, resumeSessionId, permissionMode, session, wrappedCallbacks, stderrBuffer, images, modelOptions);
     log("SESSION_COMPLETE", { sessionId: session.sessionId, repoId, partsCount: session.assistantMessage.parts.length });
     wrappedCallbacks.onDone(session.sessionId);
   } catch (err: any) {
@@ -397,7 +497,7 @@ export async function executeChat(
       session.sessionId = null;
       try {
         stderrBuffer.length = 0;
-        await runQuery(message, repoPath, abortController, null, autoEdit, session, wrappedCallbacks, stderrBuffer, images);
+        await runQuery(message, repoPath, abortController, null, permissionMode, session, wrappedCallbacks, stderrBuffer, images, modelOptions);
         log("SESSION_COMPLETE", { sessionId: session.sessionId, repoId, partsCount: session.assistantMessage.parts.length, retried: true });
         wrappedCallbacks.onDone(session.sessionId);
         return;
@@ -533,11 +633,12 @@ async function runQuery(
   repoPath: string,
   abortController: AbortController,
   resumeSessionId: string | null,
-  autoEdit: boolean,
+  permissionMode: PermissionMode,
   session: Session,
   callbacks: ChatCallbacks,
   stderrBuffer: string[],
-  images?: ImageData[]
+  images?: ImageData[],
+  modelOptions?: ModelOptions
 ): Promise<void> {
   // VSCodeデバッガ関連の環境変数を子プロセスに継承させない
   const cleanEnv = { ...process.env };
@@ -556,8 +657,13 @@ async function runQuery(
       abortController,
       env: cleanEnv,
       ...(resumeSessionId ? { resume: resumeSessionId } : {}),
+      // モデル/effortは独立オプション。sanitizeModelOptionsを通過した値のみ届く。
+      // 「おまかせ」は model:"default"（一覧の正規エントリ）として明示送信される。
+      // 未知値は sanitize 段階で落ちて undefined になり、キーごと付けずCLI既定に委譲する。
+      ...(modelOptions?.model ? { model: modelOptions.model } : {}),
+      ...(modelOptions?.effort ? { effort: modelOptions.effort } : {}),
       includePartialMessages: true,
-      permissionMode: "default",
+      permissionMode,
       systemPrompt: { type: "preset", preset: "claude_code" },
       settingSources: ["user", "project", "local"],
       stderr: (data: string) => {
@@ -565,7 +671,7 @@ async function runQuery(
         stderrBuffer.push(data);
       },
       canUseTool: async (toolName, input, { signal }) => {
-        log("TOOL", { toolName, autoEdit, inputKeys: Object.keys(input) });
+        log("TOOL", { toolName, permissionMode, inputKeys: Object.keys(input) });
 
         // AskUserQuestion: 質問ダイアログを表示してユーザーの回答を待つ
         if (toolName === "AskUserQuestion") {
@@ -590,8 +696,9 @@ async function runQuery(
           });
         }
 
-        // autoEdit有効時はEdit/Writeを自動承認
-        if (autoEdit) {
+        // acceptEdits（編集自動）時はEdit/Writeを自動承認。
+        // SDKのpermissionModeにも同値を渡しているが、canUseTool到達時の保険として残す。
+        if (permissionMode === "acceptEdits") {
           const autoApproveTools = ["Edit", "Write", "MultiEdit"];
           if (autoApproveTools.includes(toolName)) {
             log("AUTO_APPROVE", toolName);

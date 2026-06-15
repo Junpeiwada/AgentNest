@@ -13,25 +13,9 @@ export default function MinimalLayout() {
   const firstSegment = location.pathname.split("/")[1] ?? "";
   const repoId = firstSegment ? decodeURIComponent(firstSegment) : "";
 
-  const [autoEdit, setAutoEdit] = useState(() => {
-    const currentValue = localStorage.getItem("agent-nest-auto-edit");
-    if (currentValue !== null) return currentValue !== "false";
-    const legacyValue = localStorage.getItem("claudeweb-auto-edit");
-    if (legacyValue !== null) {
-      localStorage.setItem("agent-nest-auto-edit", legacyValue);
-      localStorage.removeItem("claudeweb-auto-edit");
-      return legacyValue !== "false";
-    }
-    return true;
-  });
   const [newChatNonce, setNewChatNonce] = useState(0);
   // 履歴から選択されたセッションID（URLではなくstateで管理）
   const [resumeSessionId, setResumeSessionId] = useState<string | null>(null);
-
-  const handleAutoEditChange = (value: boolean) => {
-    setAutoEdit(value);
-    localStorage.setItem("agent-nest-auto-edit", String(value));
-  };
 
   const handleRepoChange = useCallback((newRepoId: string) => {
     setResumeSessionId(null);
@@ -64,11 +48,9 @@ export default function MinimalLayout() {
         onRepoChange={handleRepoChange}
         onNewChat={handleNewChat}
         onResumeSession={handleResumeSession}
-        autoEdit={autoEdit}
-        onAutoEditChange={handleAutoEditChange}
       />
       <Box sx={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }}>
-        <Outlet context={{ autoEdit, newChatNonce, resumeSessionId }} />
+        <Outlet context={{ newChatNonce, resumeSessionId }} />
       </Box>
     </ThemeProvider>
   );

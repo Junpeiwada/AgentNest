@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { executeChat as defaultExecuteChat, log as serverLog } from "../claude/executor.js";
+import { executeChat as defaultExecuteChat, log as serverLog, sanitizeModelOptions, sanitizePermissionMode } from "../claude/executor.js";
 import { expandSlashCommand as defaultExpandSlashCommand } from "../claude/commandExpander.js";
 import { BASE_DIR } from "../config.js";
 
@@ -13,12 +13,16 @@ export function createChatRouter(
   const router = Router();
 
   router.post("/api/chat", async (req, res) => {
-    const { message, repoId, sessionId, autoEdit, images } = req.body;
+    const { message, repoId, sessionId, permissionMode, images, model, effort } = req.body;
 
     if (!message || !repoId) {
       res.status(400).json({ error: "message and repoId are required" });
       return;
     }
+
+    // 外部入力の model/effort/permissionMode はサーバ側で検証・正規化（信頼境界）
+    const modelOptions = sanitizeModelOptions({ model, effort });
+    const safePermissionMode = sanitizePermissionMode(permissionMode);
 
     const repoPath = `${BASE_DIR}/${repoId}`;
 
@@ -60,7 +64,7 @@ export function createChatRouter(
       }
     }, 15_000);
 
-    executeChatFn(prompt, repoId, repoPath, sessionId ?? null, autoEdit ?? true, {
+    executeChatFn(prompt, repoId, repoPath, sessionId ?? null, safePermissionMode, {
       onText: (content) => {
         send({ type: "text", content });
       },
@@ -110,7 +114,7 @@ export function createChatRouter(
           try { res.end(); } catch {}
         }
       },
-    }, images).catch((err) => {
+    }, images, modelOptions).catch((err) => {
       clearInterval(keepalive);
       serverLog("SSE_UNHANDLED_ERROR", { name: err?.name, message: err?.message, stack: err?.stack });
       send({ type: "error", error: err?.message ?? "Internal server error" });

@@ -13,6 +13,8 @@ import reconnectRouter from "./routes/reconnect.js";
 import sessionsRouter from "./routes/sessions.js";
 import filesRouter from "./routes/files.js";
 import gitRouter from "./routes/git.js";
+import modelsRouter from "./routes/models.js";
+import { prefetchModels } from "./claude/executor.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -31,6 +33,7 @@ app.use(reconnectRouter);
 app.use(sessionsRouter);
 app.use(filesRouter);
 app.use(gitRouter);
+app.use(modelsRouter);
 
 // Serve frontend static files in production
 // バンドル版（dist-server/frontend/dist/）と開発版（../frontend/dist/）の両方に対応
@@ -82,6 +85,8 @@ server.on("listening", () => {
   if (typeof process.send === "function") {
     process.send({ type: "ready", port: PORT });
   }
+  // モデル一覧を非ブロッキングでプリフェッチ（起動を遅らせず、失敗してもサーバは継続）
+  prefetchModels().catch(() => {});
 });
 
 // サーバークラッシュ防止: 未処理のエラーをログして継続

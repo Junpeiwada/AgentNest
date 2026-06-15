@@ -9,7 +9,6 @@ import type { Message } from "../hooks/useChat";
 import { chatPath, chatSessionPath, filesPath, gitPath, repoNavPrefix, apiSessionMessagesPath } from "../utils/paths";
 
 interface ParentContext {
-  autoEdit: boolean;
   newChatNonce: number;
   resumeSessionId: string | null;
 }
@@ -24,7 +23,7 @@ export default function RootLayout() {
   const location = useLocation();
   const { repo } = useParams<{ repo: string }>();
   const repoId = repo ?? "";
-  const { autoEdit, newChatNonce, resumeSessionId } = useOutletContext<ParentContext>();
+  const { newChatNonce, resumeSessionId } = useOutletContext<ParentContext>();
 
   const isFilesTab = location.pathname.includes("/files");
   const isGitTab = location.pathname.includes("/git");
@@ -149,7 +148,6 @@ export default function RootLayout() {
           <Chat
             key={chatKey}
             repoId={repoId}
-            autoEdit={autoEdit}
             visible={activeTab === "chat"}
             onSessionIdChange={(sessionId) => {
               // URL同期: replaceStateでReact Routerの再レンダリングを起こさない
@@ -167,7 +165,7 @@ export default function RootLayout() {
 
       {/* Files / Git（Outlet 経由、display で切り替え） */}
       <Box sx={{ display: activeTab !== "chat" ? "flex" : "none", flexDirection: "column", flex: 1, minHeight: 0 }}>
-        <Outlet context={{ autoEdit }} />
+        <Outlet />
       </Box>
     </>
   );

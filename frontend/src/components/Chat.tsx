@@ -11,7 +11,6 @@ import type { Message } from "../hooks/useChat";
 
 interface Props {
   repoId: string;
-  autoEdit: boolean;
   onSessionIdChange?: (sessionId: string | null) => void;
   initialMessages?: Message[];
   initialSessionId?: string | null;
@@ -19,7 +18,7 @@ interface Props {
   visible?: boolean;
 }
 
-export default function Chat({ repoId, autoEdit, onSessionIdChange, initialMessages, initialSessionId, resetNonce, visible }: Props) {
+export default function Chat({ repoId, onSessionIdChange, initialMessages, initialSessionId, resetNonce, visible }: Props) {
   const conversationKey = initialSessionId != null
     ? `session:${initialSessionId}`
     : `new:${resetNonce ?? 0}`;
@@ -36,6 +35,13 @@ export default function Chat({ repoId, autoEdit, onSessionIdChange, initialMessa
     respondPermission,
     respondQuestion,
     stopGeneration,
+    models,
+    selectedModel,
+    selectedEffort,
+    setSelectedModel,
+    setSelectedEffort,
+    permissionMode,
+    setPermissionMode,
   } = useChat(initialMessages, initialSessionId, conversationKey);
 
   // AI応答待ち中はiPhoneのスリープを防止
@@ -83,11 +89,18 @@ export default function Chat({ repoId, autoEdit, onSessionIdChange, initialMessa
       >
         <ActivityIndicator activity={activity} isLoading={isLoading} sessionState={sessionState} toolProgress={toolProgress} />
         <MessageInput
-          onSend={(msg, images) => sendMessage(msg, repoId, autoEdit, images)}
+          onSend={(msg, images) => sendMessage(msg, repoId, images)}
           onStop={handleStop}
           disabled={!repoId || !!pendingPermission || !!pendingQuestion}
           isLoading={isLoading}
           visible={visible}
+          models={models}
+          selectedModel={selectedModel}
+          selectedEffort={selectedEffort}
+          onSelectModel={setSelectedModel}
+          onSelectEffort={setSelectedEffort}
+          permissionMode={permissionMode}
+          onSelectMode={setPermissionMode}
         />
       </Box>
 

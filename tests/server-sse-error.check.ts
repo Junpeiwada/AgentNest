@@ -25,7 +25,7 @@ const mockExpand: ExpandSlashCommandFn = async (message) => ({
 
 /** executeChat が想定外例外を投げるモック */
 const throwingExecuteChat: ExecuteChatFn = async (
-  _message, _repoId, _repoPath, _sessionId, _autoEdit, callbacks,
+  _message, _repoId, _repoPath, _sessionId, _permissionMode, callbacks,
 ) => {
   // onText で少しだけデータを送った後に例外
   callbacks.onText("Hello");
@@ -34,7 +34,7 @@ const throwingExecuteChat: ExecuteChatFn = async (
 
 /** executeChat が正常に完了するモック */
 const normalExecuteChat: ExecuteChatFn = async (
-  _message, _repoId, _repoPath, _sessionId, _autoEdit, callbacks,
+  _message, _repoId, _repoPath, _sessionId, _permissionMode, callbacks,
 ) => {
   callbacks.onSessionId("test-session");
   callbacks.onText("Hello");
