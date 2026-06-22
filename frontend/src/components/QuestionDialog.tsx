@@ -144,6 +144,7 @@ function SingleQuestion({
                     value={state.otherText}
                     onChange={(e) => onOtherText(e.target.value)}
                     onKeyDown={(e) => {
+                      if (e.nativeEvent.isComposing) return;
                       if (e.key === "Enter" && !e.shiftKey) {
                         e.preventDefault();
                         onSubmit();

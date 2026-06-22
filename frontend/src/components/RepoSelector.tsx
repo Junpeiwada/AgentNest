@@ -91,6 +91,7 @@ export default function RepoSelector({ value, onChange }: Props) {
   );
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.nativeEvent.isComposing) return;
     switch (e.key) {
       case "Escape":
         closeDropdown();

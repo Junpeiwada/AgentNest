@@ -15,6 +15,7 @@ export default function GitCommitBox({ message, onMessageChange, onCommit, onUnd
   const disabled = loading || stagedCount === 0 || !message.trim();
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.nativeEvent.isComposing) return;
     if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && !disabled) {
       onCommit();
     }
