@@ -116,8 +116,9 @@ test.describe("Normal chat flow", () => {
     });
     await expect(page.getByText("Done!")).toBeVisible();
 
-    // Tool result should be inside a <details> with "Read Result" summary
-    await expect(page.getByText("Read Result")).toBeVisible();
+    // Tool result should be inside a <details> with a "Read" summary
+    // （ToolDiffView は Read を「Read」/「Read <パス>」と要約。ファイルパス無しのモックでは「Read」）
+    await expect(page.locator("details.tool-result summary")).toHaveText("Read");
   });
 
   test("shows error from server", async ({ page }) => {
@@ -488,11 +489,11 @@ test.describe("Reconnection", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Tests: Permission Dialog + Auto Edit toggle
+// Tests: Permission Dialog + 実行モード（ModeSelector）変更
 // ---------------------------------------------------------------------------
 
-test.describe("Permission dialog with Auto toggle", () => {
-  test("chat is not unmounted when Auto toggle is clicked while permission dialog is shown", async ({
+test.describe("Permission dialog with mode selector", () => {
+  test("chat is not unmounted when permission mode is changed while permission dialog is shown", async ({
     page,
   }) => {
     await mockRepos(page);
@@ -530,10 +531,12 @@ test.describe("Permission dialog with Auto toggle", () => {
     // ユーザーメッセージが表示されていることを確認
     await expect(page.getByText("Write a file")).toBeVisible();
 
-    // Autoトグルをクリック（権限ダイアログのバックドロップが覆っているためforce指定）
-    // 実際のAutoトグルはonPointerDownイベントを使用しているため、pointerdownもディスパッチ
-    const autoToggle = page.getByRole("button", { name: /Auto Edit/i });
-    await autoToggle.dispatchEvent("pointerdown");
+    // 実行モード（ModeSelector）を変更してもチャットがアンマウントされないことを確認。
+    // 権限ダイアログのバックドロップ(zIndex:1200)がツールバーを覆うため、dispatchEventで直接クリックして
+    // モードポップオーバーを開き、別モード（Ask before edits）を選択する。
+    const modeButton = page.getByRole("button", { name: /Edit Automatically/i });
+    await modeButton.dispatchEvent("click");
+    await page.getByRole("button", { name: /Ask before edits/i }).click();
 
     // チャットがアンマウントされていないことを確認:
     // 1. ユーザーメッセージがまだ表示されている

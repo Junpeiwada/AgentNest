@@ -426,7 +426,7 @@ test.describe("File viewer", () => {
     await expect(page.getByText("ファイルが大きすぎます")).toBeVisible();
   });
 
-  test("chat FAB switches to chat tab", async ({ page }) => {
+  test("switches from file viewer back to chat via tab bar", async ({ page }) => {
     await setupAll(page);
     await page.goto("/");
     await selectRepo(page);
@@ -435,8 +435,8 @@ test.describe("File viewer", () => {
     await page.getByText("README.md").click();
     await expect(page.locator("h1", { hasText: "Project Title" })).toBeVisible();
 
-    // Click the chat FAB (the Fab button inside the file viewer, not the tab bar icon)
-    await page.locator("button.MuiFab-root").click();
+    // ファイル閲覧中にタブバーの「チャット」でチャットへ戻れること（旧チャットFABの代替）
+    await switchToChatTab(page);
 
     // Should switch to chat tab
     await expect(page.getByPlaceholder("Message AgentNest...")).toBeVisible();

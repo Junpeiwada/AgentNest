@@ -121,9 +121,12 @@ test.describe("Session history", () => {
     await page.getByText("Fix authentication bug").click();
 
     // Past messages should be loaded
-    await expect(page.getByText("認証のバグを修正して")).toBeVisible({
-      timeout: 5000,
-    });
+    // Historyプレビューの firstMessage と本文の両方にマッチする。
+    // パネルは選択後に折りたたまれるが Collapse のクリップのため要素自体はDOMに残るので、
+    // DOM後方（=メッセージ一覧側）の本文を .last() で指定して曖昧さを解消する。
+    await expect(
+      page.getByText("認証のバグを修正して").last()
+    ).toBeVisible({ timeout: 5000 });
     await expect(
       page.getByText("認証モジュールを確認しました。バグを修正します。")
     ).toBeVisible();
@@ -132,7 +135,7 @@ test.describe("Session history", () => {
     // User can send a new message to continue the session
     const input = page.getByPlaceholder("Message AgentNest...");
     await input.fill("もう一つ修正して");
-    await input.press("Enter");
+    await input.press("Meta+Enter"); // デスクトップ送信は Cmd/Ctrl+Enter
 
     await expect(page.getByText("了解しました。")).toBeVisible({
       timeout: 5000,
@@ -165,9 +168,12 @@ test.describe("Session history", () => {
     await page.getByText("History").click();
     await page.getByText("Fix authentication bug").click();
 
-    await expect(page.getByText("認証のバグを修正して")).toBeVisible({
-      timeout: 5000,
-    });
+    // Historyプレビューの firstMessage と本文の両方にマッチする。
+    // パネルは選択後に折りたたまれるが Collapse のクリップのため要素自体はDOMに残るので、
+    // DOM後方（=メッセージ一覧側）の本文を .last() で指定して曖昧さを解消する。
+    await expect(
+      page.getByText("認証のバグを修正して").last()
+    ).toBeVisible({ timeout: 5000 });
     await expect(page).toHaveURL(/\/TestRepo\/chat\/aaa-111$/);
 
     await page.getByText("New").click();
@@ -176,7 +182,7 @@ test.describe("Session history", () => {
 
     const input = page.getByPlaceholder("Message AgentNest...");
     await input.fill("新しい相談です");
-    await input.press("Enter");
+    await input.press("Meta+Enter"); // デスクトップ送信は Cmd/Ctrl+Enter
 
     await expect.poll(() => postedSessionId).toBe(null);
     await expect(page.getByText("新しい相談です")).toBeVisible();

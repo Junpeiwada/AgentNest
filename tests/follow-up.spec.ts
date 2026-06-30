@@ -39,7 +39,8 @@ async function selectRepo(page: Page) {
 async function typeAndSend(page: Page, message: string) {
   const input = page.getByPlaceholder("Message AgentNest...");
   await input.fill(message);
-  await input.press("Enter");
+  // デスクトップの送信は Cmd/Ctrl+Enter（プレーンEnterは改行。IME誤送信防止のため）
+  await input.press("Meta+Enter");
 }
 
 // ---------------------------------------------------------------------------
