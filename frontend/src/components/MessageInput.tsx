@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback, useEffect } from "react";
+import { memo, useState, useRef, useCallback, useEffect } from "react";
 import { Box, IconButton, InputBase, Typography } from "@mui/material";
 import ArrowUpwardRoundedIcon from "@mui/icons-material/ArrowUpwardRounded";
 import StopRoundedIcon from "@mui/icons-material/StopRounded";
@@ -53,7 +53,7 @@ function parseDataUrl(dataUrl: string): { data: string; mediaType: string } {
 
 const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
 
-export default function MessageInput({
+function MessageInput({
   onSend,
   onStop,
   disabled,
@@ -428,3 +428,5 @@ export default function MessageInput({
     </Box>
   );
 }
+
+export default memo(MessageInput);

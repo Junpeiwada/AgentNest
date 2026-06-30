@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef } from "react";
+import { memo, useCallback, useEffect, useRef } from "react";
 import { Box, Typography } from "@mui/material";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -96,10 +96,10 @@ export default function MessageList({ messages, isLoading, repoId }: Props) {
       >
         {messages.map((msg, i) =>
           msg.role === "user" ? (
-            <UserMessage key={i} content={msg.content} images={msg.images} />
+            <UserMessage key={`u-${i}`} content={msg.content} images={msg.images} />
           ) : (
             <AssistantMessage
-              key={i}
+              key={`a-${i}`}
               message={msg}
               isStreaming={isLoading && i === messages.length - 1}
             />
@@ -110,7 +110,7 @@ export default function MessageList({ messages, isLoading, repoId }: Props) {
   );
 }
 
-function UserMessage({ content, images }: { content: string; images?: Message["images"] }) {
+const UserMessage = memo(function UserMessage({ content, images }: { content: string; images?: Message["images"] }) {
   return (
     <Box
       sx={{
@@ -164,9 +164,9 @@ function UserMessage({ content, images }: { content: string; images?: Message["i
       </Box>
     </Box>
   );
-}
+});
 
-function AssistantMessage({
+const AssistantMessage = memo(function AssistantMessage({
   message,
   isStreaming,
 }: {
@@ -372,4 +372,4 @@ function AssistantMessage({
       ) : null}
     </Box>
   );
-}
+});

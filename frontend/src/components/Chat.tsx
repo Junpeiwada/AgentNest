@@ -7,7 +7,7 @@ import PermissionDialog from "./PermissionDialog";
 import QuestionDialog from "./QuestionDialog";
 import { useChat } from "../hooks/useChat";
 import { useWakeLock } from "../hooks/useWakeLock";
-import type { Message } from "../hooks/useChat";
+import type { Message, ImageAttachment } from "../hooks/useChat";
 
 interface Props {
   repoId: string;
@@ -60,6 +60,11 @@ export default function Chat({ repoId, onSessionIdChange, initialMessages, initi
     await stopGeneration();
   }, [stopGeneration]);
 
+  const handleSend = useCallback(
+    (msg: string, images?: ImageAttachment[]) => sendMessage(msg, repoId, images),
+    [sendMessage, repoId]
+  );
+
   return (
     <Box
       sx={{
@@ -89,7 +94,7 @@ export default function Chat({ repoId, onSessionIdChange, initialMessages, initi
       >
         <ActivityIndicator activity={activity} isLoading={isLoading} sessionState={sessionState} toolProgress={toolProgress} />
         <MessageInput
-          onSend={(msg, images) => sendMessage(msg, repoId, images)}
+          onSend={handleSend}
           onStop={handleStop}
           disabled={!repoId || !!pendingPermission || !!pendingQuestion}
           isLoading={isLoading}
