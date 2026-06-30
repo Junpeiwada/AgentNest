@@ -4,9 +4,10 @@
  * node_modules ごとコピーする。
  */
 import { build } from "esbuild";
-import { cpSync, mkdirSync, rmSync, existsSync } from "fs";
-import { resolve, dirname } from "path";
+import { cpSync, mkdirSync, rmSync, existsSync, readdirSync, statSync } from "fs";
+import { resolve, dirname, join } from "path";
 import { fileURLToPath } from "url";
+import { execFileSync } from "child_process";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = resolve(__dirname, "..");
@@ -76,6 +77,62 @@ if (existsSync(frontendDist)) {
   console.log("  コピー: frontend/dist → dist-server/frontend/dist");
 } else {
   console.warn("  警告: frontend/dist が存在しません。先にビルド:フロントエンドを実行してください");
+}
+
+// 4. バンドル内のネイティブバイナリ（darwin Mach-O の .node / .dylib）を署名する。
+//
+// Apple の公証（notarization）はバンドル内の「全ての Mach-O バイナリ」が
+// Developer ID + hardened runtime + セキュアタイムスタンプで署名されていることを要求する。
+// sharp / ripgrep / audio-capture などの .node はこの工程で署名しないと公証が必ず失敗する。
+//
+// Tauri はバンドル外周（.app 本体）しか署名せず、Resources 配下の入れ子 Mach-O は
+// 署名対象にしないため、ここで「内→外」順に先に署名しておく必要がある。
+// 署名は APPLE_SIGNING_IDENTITY が設定されているとき（= リリース時）のみ実行する。
+// 通常の開発ビルドでは未署名のままで問題ない（ローカル実行・TCCは外周署名で足りる）。
+function isMachO(file) {
+  try {
+    const out = execFileSync("file", ["-b", file], { encoding: "utf8" });
+    return out.includes("Mach-O");
+  } catch {
+    return false;
+  }
+}
+
+function collectFiles(dir, exts, acc = []) {
+  for (const name of readdirSync(dir)) {
+    const p = join(dir, name);
+    const st = statSync(p);
+    if (st.isDirectory()) {
+      collectFiles(p, exts, acc);
+    } else if (exts.some((e) => name.endsWith(e))) {
+      acc.push(p);
+    }
+  }
+  return acc;
+}
+
+function signNativeBinaries(dir, identity) {
+  const candidates = collectFiles(dir, [".node", ".dylib"]);
+  const machO = candidates.filter(isMachO); // win32(PE)/linux(ELF) は除外
+  if (machO.length === 0) {
+    console.log("  署名対象のネイティブバイナリなし");
+    return;
+  }
+  console.log(`  ネイティブバイナリ署名（${machO.length}件）: ${identity}`);
+  for (const f of machO) {
+    execFileSync(
+      "codesign",
+      ["--force", "--options", "runtime", "--timestamp", "--sign", identity, f],
+      { stdio: "inherit" },
+    );
+  }
+}
+
+const signingIdentity = process.env.APPLE_SIGNING_IDENTITY;
+if (signingIdentity) {
+  signNativeBinaries(outDir, signingIdentity);
+} else {
+  console.log("  ネイティブバイナリ署名スキップ（APPLE_SIGNING_IDENTITY 未設定）");
 }
 
 console.log("サーバービルド完了 → dist-server/");

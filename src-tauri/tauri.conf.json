@@ -39,7 +39,8 @@
     ],
     "category": "DeveloperTool",
     "macOS": {
-      "minimumSystemVersion": "10.15"
+      "minimumSystemVersion": "10.15",
+      "signingIdentity": "Developer ID Application: Junpei Wada (L897K2C26B)"
     },
     "publisher": "Junpei Wada",
     "createUpdaterArtifacts": "v1Compatible"

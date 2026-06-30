@@ -10,6 +10,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - [Docs/仕様-実行モード選択.md](Docs/仕様-実行モード選択.md) — 実行モード選択（`ModeSelector.tsx`）
 - [Docs/設計-URL.md](Docs/設計-URL.md) / [Docs/設計-画面.md](Docs/設計-画面.md) — URL・画面設計
 - [Docs/ガイド-テスト.md](Docs/ガイド-テスト.md) / [Docs/ガイド-運用.md](Docs/ガイド-運用.md) — テスト・運用ガイド
+- [Docs/ガイド-署名と公証.md](Docs/ガイド-署名と公証.md) — macOSコード署名・公証（Developer ID、notarization、書類フォルダTCC対策）
 
 `Docs/` の各Markdownの見出しを変更したら、[Tools/GenDocsToc/gen_toc.py](Tools/GenDocsToc/gen_toc.py) で目次を再生成する（冪等）:
 
@@ -70,18 +71,23 @@ cd frontend && npm run lint
 
 ### 前提条件
 - GitHub CLI（`gh`）が認証済み
-- Tauri署名秘密鍵が `~/.tauri/AgentNest.key` に配置済み（環境変数 `TAURI_SIGNING_PRIVATE_KEY` でも可）
+- Tauri署名秘密鍵（updater用minisign）が `~/.tauri/AgentNest.key` に配置済み（環境変数 `TAURI_SIGNING_PRIVATE_KEY` でも可）
 - Rust（cargo）がインストール済み
+- Appleコード署名・公証（macOS配布で必須。詳細は [Docs/ガイド-署名と公証.md](Docs/ガイド-署名と公証.md)）
+  - Keychainに `Developer ID Application: Junpei Wada (L897K2C26B)` 証明書（`tauri.conf.json` の `bundle.macOS.signingIdentity`）
+  - 公証用 App Store Connect API キー情報を `~/.tauri/AgentNest.notary.env` に配置（未設定なら公証なしでビルド続行）
 
 ### release.sh の処理フロー
 1. `npm version patch` でバージョンを自動インクリメント
 2. バージョン変更をコミット＆タグ作成
-3. フロントエンドビルド → Tauriビルド（署名付き）
-4. GitHub Releasesにdraftリリース作成
-5. DMG、`.app.tar.gz`（updater用）、`latest.json` をアップロード
-6. 現在のブランチとタグをpush
-7. リリースを公開
-8. 古いリリースを自動削除（最新のみ保持）
+3. `tauri.conf.json` から署名IDを展開し、`~/.tauri/AgentNest.notary.env` から公証情報を読み込み
+4. フロントエンドビルド → Tauriビルド（Developer ID署名 + hardened runtime、バンドル内ネイティブ`.node`署名、公証＋staple）
+5. `codesign --verify` / `stapler validate` で署名・公証を検証（失敗で中断）
+6. GitHub Releasesにdraftリリース作成
+7. DMG、`.app.tar.gz`（updater用）、`latest.json` をアップロード
+8. 現在のブランチとタグをpush
+9. リリースを公開
+10. 古いリリースを自動削除（最新のみ保持）
 
 ### 自動更新の仕組み
 - Tauri updater プラグインが `https://github.com/Junpeiwada/AgentNest/releases/latest/download/latest.json` を参照

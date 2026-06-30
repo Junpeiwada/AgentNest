@@ -39,6 +39,43 @@ else
   echo "署名キー: 環境変数から読み込み"
 fi
 
+# Apple コード署名ID（Developer ID Application）。
+# 真実の源は src-tauri/tauri.conf.json の bundle.macOS.signingIdentity。
+# build-server.mjs のネイティブバイナリ署名でも使うため env に展開する。
+export APPLE_SIGNING_IDENTITY=$(node -p "require('./src-tauri/tauri.conf.json').bundle.macOS.signingIdentity")
+if [ -z "$APPLE_SIGNING_IDENTITY" ] || [ "$APPLE_SIGNING_IDENTITY" = "undefined" ]; then
+  echo "エラー: tauri.conf.json に bundle.macOS.signingIdentity が設定されていません"
+  exit 1
+fi
+echo "署名ID: ${APPLE_SIGNING_IDENTITY}"
+
+# 公証（notarization）認証情報を読み込む。
+# App Store Connect API キー方式:
+#   APPLE_API_KEY      … Key ID（AuthKey_XXXX.p8 の XXXX 部分）
+#   APPLE_API_ISSUER   … Issuer ID（App Store Connect で発行されるUUID）
+#   APPLE_API_KEY_PATH … AuthKey_XXXX.p8 への絶対パス
+# これらを ~/.tauri/AgentNest.notary.env に export 形式で書いておく（gitには含めない）。
+if [ -z "${APPLE_API_ISSUER:-}" ] && [ -f "$HOME/.tauri/AgentNest.notary.env" ]; then
+  # shellcheck disable=SC1091
+  source "$HOME/.tauri/AgentNest.notary.env"
+  echo "公証認証情報: ~/.tauri/AgentNest.notary.env から読み込み"
+fi
+
+if [ -n "${APPLE_API_KEY:-}" ] && [ -n "${APPLE_API_ISSUER:-}" ] && [ -n "${APPLE_API_KEY_PATH:-}" ]; then
+  if [ ! -f "$APPLE_API_KEY_PATH" ]; then
+    echo "エラー: APPLE_API_KEY_PATH のファイルが見つかりません: $APPLE_API_KEY_PATH"
+    exit 1
+  fi
+  export APPLE_API_KEY APPLE_API_ISSUER APPLE_API_KEY_PATH
+  NOTARIZE=1
+  echo "公証: 有効（Key ID=${APPLE_API_KEY}）"
+else
+  NOTARIZE=0
+  echo "⚠️  公証情報が未設定のため公証なしでビルドします。"
+  echo "    他Macでの配布時にGatekeeper警告が出ます（自分のMacでのTCC許可永続化は署名のみで有効）。"
+  echo "    ~/.tauri/AgentNest.notary.env に APPLE_API_KEY / APPLE_API_ISSUER / APPLE_API_KEY_PATH を設定してください。"
+fi
+
 # 現在のブランチを取得
 BRANCH=$(git rev-parse --abbrev-ref HEAD)
 echo "現在のブランチ: ${BRANCH}"
@@ -58,6 +95,24 @@ git tag "v${VERSION}"
 # Universal Binary（x86_64 + arm64）でビルドし、Intel/Apple Silicon両方で動作させる
 echo "=== Tauriビルド（Universal Binary、フロントエンド・サーバー含む）==="
 npx tauri build --target universal-apple-darwin
+
+# 4. 署名・公証の検証（不正な成果物をアップロードしないためのゲート）
+echo "=== 署名・公証の検証 ==="
+APP_PATH="src-tauri/target/universal-apple-darwin/release/bundle/macos/AgentNest.app"
+if ! codesign --verify --deep --strict --verbose=2 "$APP_PATH"; then
+  echo "エラー: コード署名の検証に失敗しました"
+  exit 1
+fi
+echo "コード署名: OK（$(codesign -dvv "$APP_PATH" 2>&1 | grep -E 'Authority|TeamIdentifier' | head -2 | tr '\n' ' ')）"
+
+if [ "${NOTARIZE:-0}" = "1" ]; then
+  if ! xcrun stapler validate "$APP_PATH"; then
+    echo "エラー: 公証チケットがstapleされていません（公証に失敗、または環境変数が認識されていない可能性）"
+    exit 1
+  fi
+  spctl -a -vvv --type execute "$APP_PATH" 2>&1 | head -5 || true
+  echo "公証staple: OK"
+fi
 
 # 5. git push（タグをリリース前にpush）
 echo "=== git push ==="
