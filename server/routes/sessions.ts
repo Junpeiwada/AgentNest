@@ -3,6 +3,7 @@ import { readdir, readFile, stat } from "fs/promises";
 import { join } from "path";
 import { homedir } from "os";
 import { BASE_DIR } from "../config.js";
+import { stringifyToolResultContent, imagePathFromToolInput } from "../claude/toolResultContent.js";
 
 const router = Router();
 const CLAUDE_DIR = join(homedir(), ".claude", "projects");
@@ -156,11 +157,9 @@ router.get("/api/sessions/:repoId/:sessionId/messages", async (req, res) => {
                   const toolUseId = typeof block.tool_use_id === "string" ? block.tool_use_id : "";
                   const toolInfo = toolUseMap.get(toolUseId);
                   const rawContent = block.content;
-                  const text = typeof rawContent === "string"
-                    ? rawContent
-                    : Array.isArray(rawContent)
-                      ? rawContent.map((item: any) => (typeof item === "string" ? item : (item?.text ?? JSON.stringify(item)))).join("\n")
-                      : rawContent == null ? "" : JSON.stringify(rawContent);
+                  // 画像ブロックは base64 を捨ててプレースホルダ化（巨大化の主因）。executor.ts と共通処理。
+                  const imageFilePath = imagePathFromToolInput(toolInfo?.input);
+                  const text = stringifyToolResultContent(rawContent, imageFilePath);
                   last.parts.push({
                     type: "tool_result",
                     toolName: toolInfo?.name ?? "Tool",

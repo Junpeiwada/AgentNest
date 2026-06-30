@@ -4,6 +4,7 @@ import { randomUUID } from "crypto";
 import { appendFile, readdir, unlink, rename } from "fs/promises";
 import { join } from "path";
 import { BASE_DIR, CLAUDE_CLI_PATH } from "../config.js";
+import { stringifyToolResultContent, imagePathFromToolInput } from "./toolResultContent.js";
 
 const LOG_DIR = join(import.meta.dirname, "../../logs");
 const LOG_RETENTION_DAYS = 10;
@@ -520,23 +521,6 @@ export async function executeChat(
   }
 }
 
-function stringifyToolResultContent(content: unknown): string {
-  if (typeof content === "string") return content;
-  if (Array.isArray(content)) {
-    return content
-      .map((item) => {
-        if (typeof item === "string") return item;
-        if (item && typeof item === "object" && "text" in item && typeof (item as { text?: unknown }).text === "string") {
-          return (item as { text: string }).text;
-        }
-        return JSON.stringify(item, null, 2);
-      })
-      .join("\n");
-  }
-  if (content == null) return "";
-  return JSON.stringify(content, null, 2);
-}
-
 function appendAssistantText(session: Session, content: string): void {
   const message = session.assistantMessage;
   message.content += content;
@@ -820,12 +804,15 @@ async function runQuery(
               structuredPatch = r.structuredPatch;
             }
           }
+          const toolInput = toolUseInputs.get(toolUseId);
+          // 画像プレースホルダ用のファイルパス（tool_use_resultのfilePath優先、無ければtool_inputから推測）
+          const imageFilePath = filePath ?? imagePathFromToolInput(toolInput);
           callbacks.onToolResult({
             toolName: toolUseNames.get(toolUseId) ?? "Tool",
-            content: stringifyToolResultContent(block.content),
+            content: stringifyToolResultContent(block.content, imageFilePath),
             filePath,
             structuredPatch,
-            toolInput: toolUseInputs.get(toolUseId),
+            toolInput,
           });
         }
       }
