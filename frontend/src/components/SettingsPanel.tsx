@@ -1,7 +1,10 @@
 import { Box, Typography } from "@mui/material";
 import CheckRoundedIcon from "@mui/icons-material/CheckRounded";
 import {
+  DEFAULT_MODEL_VALUE,
   EFFORT_LABELS,
+  resolveDefaultModelLabel,
+  supportsEffortFor,
   type EffortLevel,
   type ModelInfo,
 } from "../lib/modelSettings";
@@ -25,13 +28,15 @@ export default function SettingsPanel({
 }: Props) {
   const activeModel = models.find((m) => m.value === selectedModel) ?? null;
 
-  // supportsEffort=false・対応段階なしのときは effort 行を非表示
-  const effortLevels =
-    activeModel && activeModel.supportsEffort !== false
-      ? (activeModel.supportedEffortLevels ?? []).filter((l) =>
-          EFFORT_ORDER.includes(l)
-        )
-      : [];
+  // 「おまかせ」が実際に解決されるモデル名。取得できない場合（古いSDK/CLI）は併記しない
+  const defaultResolvedLabel = resolveDefaultModelLabel(models);
+
+  // effort 非対応モデルでは行ごと非表示（判定は modelSettings に集約し normalizeEffort と揃える）
+  const effortLevels = supportsEffortFor(activeModel)
+    ? (activeModel!.supportedEffortLevels ?? []).filter((l) =>
+        EFFORT_ORDER.includes(l)
+      )
+    : [];
   const showEffort = effortLevels.length > 0;
 
   return (
@@ -61,6 +66,10 @@ export default function SettingsPanel({
               key={m.value}
               displayName={m.displayName}
               description={m.description}
+              // 「おまかせ」だけは解決先の実体モデル名を併記する
+              resolvedLabel={
+                m.value === DEFAULT_MODEL_VALUE ? defaultResolvedLabel : null
+              }
               selected={selectedModel === m.value}
               onClick={() => onSelectModel(m.value)}
             />
@@ -161,11 +170,14 @@ function SectionLabel({ children }: { children: React.ReactNode }) {
 function ModelRow({
   displayName,
   description,
+  resolvedLabel,
   selected,
   onClick,
 }: {
   displayName: string;
   description: string;
+  /** 「おまかせ」の解決先モデル名。null なら併記しない */
+  resolvedLabel?: string | null;
   selected: boolean;
   onClick: () => void;
 }) {
@@ -216,6 +228,17 @@ function ModelRow({
         >
           {displayName}
         </Typography>
+        {resolvedLabel && (
+          <Typography
+            sx={(theme) => ({
+              fontSize: "12px",
+              color: theme.palette.textTertiary,
+              mt: 0.25,
+            })}
+          >
+            実体: {resolvedLabel}
+          </Typography>
+        )}
         {description && (
           <Typography
             sx={(theme) => ({

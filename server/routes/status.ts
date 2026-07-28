@@ -18,8 +18,10 @@ router.get("/api/status", (_req, res) => {
 });
 
 router.post("/api/interrupt", async (_req, res) => {
-  const interrupted = await interruptSession();
-  res.json({ interrupted });
+  // stillQueued が非空なら停止しきれていない（キューに残る処理がある）。
+  // 既存クライアント互換のため interrupted は従来どおり返し、詳細を追加フィールドで渡す。
+  const { interrupted, stillQueued } = await interruptSession();
+  res.json({ interrupted, stillQueued });
 });
 
 export default router;

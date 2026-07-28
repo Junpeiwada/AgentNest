@@ -1,5 +1,5 @@
-import { query } from "@anthropic-ai/claude-agent-sdk";
-import type { SDKMessage, SDKUserMessage, PermissionResult, ModelInfo, EffortLevel } from "@anthropic-ai/claude-agent-sdk";
+import { query, USAGE_LIMIT_ERROR_PREFIXES } from "@anthropic-ai/claude-agent-sdk";
+import type { Query, SDKMessage, SDKUserMessage, PermissionResult, ModelInfo, EffortLevel } from "@anthropic-ai/claude-agent-sdk";
 import { randomUUID } from "crypto";
 import { appendFile, readdir, unlink, rename } from "fs/promises";
 import { join } from "path";
@@ -213,7 +213,9 @@ function formatToolActivity(toolName: string, input: Record<string, unknown>): s
 }
 
 let currentSession: Session | null = null;
-let currentStream: AsyncGenerator<SDKMessage, void> & { interrupt?(): Promise<void> } | null = null;
+// SDKが公開する Query 型をそのまま使う（interrupt() 等のシグネチャ変更に追従するため、
+// 構造的型を手書きしない）。
+let currentStream: Query | null = null;
 const permissionResolvers = new Map<string, { resolve: (result: PermissionResult) => void; input: Record<string, unknown> }>();
 const questionResolvers = new Map<string, { resolve: (result: PermissionResult) => void; questions: QuestionItem[] }>();
 
@@ -235,12 +237,31 @@ export function abortCurrentSession(): void {
   }
 }
 
-export async function interruptSession(): Promise<boolean> {
-  if (currentStream?.interrupt) {
-    await currentStream.interrupt();
-    return true;
+export interface InterruptResult {
+  /** 実行中セッションがあり interrupt を発行できたか */
+  interrupted: boolean;
+  /**
+   * 割り込み後も残る非同期メッセージの uuid（SDK 0.3.220 の interrupt_receipt_v1）。
+   * 非空なら「停止しきれていない」ことを意味する。旧CLIは受領票を返さないため常に空配列。
+   */
+  stillQueued: string[];
+}
+
+/**
+ * 実行中セッションに割り込む。
+ *
+ * Query.interrupt() は必須メソッドなので存在チェックは不要で、currentStream の null 判定のみ行う。
+ * 戻り値の受領票は握り潰さず still_queued をそのまま返す（キューに残る処理があるのに
+ * 「停止した」と報告してしまうのを避けるため）。
+ */
+export async function interruptSession(): Promise<InterruptResult> {
+  if (!currentStream) return { interrupted: false, stillQueued: [] };
+  const receipt = await currentStream.interrupt(); // 旧CLIでは undefined
+  const stillQueued = receipt?.still_queued ?? [];
+  if (stillQueued.length > 0) {
+    log("INTERRUPT_STILL_QUEUED", { stillQueued });
   }
-  return false;
+  return { interrupted: true, stillQueued };
 }
 
 export function resolvePermission(requestId: string, approved: boolean): boolean {
@@ -532,7 +553,19 @@ function appendAssistantText(session: Session, content: string): void {
   }
 }
 
-function isLimitErrorText(content: string): boolean {
+/**
+ * 使用量上限のメッセージかどうかを判定する。
+ *
+ * SDK が公開する USAGE_LIMIT_ERROR_PREFIXES を第一の判定基準にする（"You're out of usage credits"
+ * や "Fable 5 requires usage credits" など、手書き正規表現では拾えない文言を網羅するため）。
+ * SDK 側の文言は前方一致で与えられるが、CLI は先頭に記号や空白を伴って出すことがあるので includes で見る。
+ * 既存の正規表現は SDK 定数に無い言い回し（"spending cap reached" や "resets 5pm" 形式）を
+ * 拾い続けるために OR で残す。
+ */
+export function isLimitErrorText(content: string): boolean {
+  if (USAGE_LIMIT_ERROR_PREFIXES.some((prefix) => content.includes(prefix))) {
+    return true;
+  }
   return /spending cap reached|you'?ve hit your limit/i.test(content)
     || (/resets\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)/i.test(content) && /limit|cap/i.test(content));
 }

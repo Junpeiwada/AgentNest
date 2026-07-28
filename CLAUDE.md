@@ -53,6 +53,9 @@ npm start
 # テスト（Playwright E2E）
 npm test
 
+# テスト（tests/*.check.ts の単体チェックをまとめて実行。npm test には含まれない）
+npm run テスト:単体チェック
+
 # テスト（UI モード）
 npm run テスト:UIモード
 
