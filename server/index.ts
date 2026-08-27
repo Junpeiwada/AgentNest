@@ -15,7 +15,7 @@ import sessionsRouter from "./routes/sessions.js";
 import filesRouter from "./routes/files.js";
 import gitRouter from "./routes/git.js";
 import modelsRouter from "./routes/models.js";
-import { prefetchModels } from "./claude/executor.js";
+import { prefetchModels, sanitizeConnectionId } from "./claude/executor.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -24,6 +24,15 @@ const PORT = process.env.PORT ? parseInt(process.env.PORT) : 3000;
 
 app.use(cors());
 app.use(express.json({ limit: "20mb" }));
+
+// マルチセッション対応: HTTPヘッダ `X-Connection-Id`（タブ・端末ごとのUUID）を検証し res.locals に格納する。
+// このミドルウェア自体は 400 を返さない（connectionId を使わないルートもあるため）。
+// 実際に connectionId を要求するルート（chat/reconnect/permission/status）側で
+// res.locals.connectionId が null なら 400 を返す。
+app.use((req, res, next) => {
+  res.locals.connectionId = sanitizeConnectionId(req.header("X-Connection-Id"));
+  next();
+});
 
 // API routes
 app.use(reposRouter);

@@ -158,7 +158,6 @@ export default function RootLayout() {
             }}
             initialMessages={initialMessages}
             initialSessionId={initialSessionId}
-            resetNonce={newChatNonce}
           />
         )}
       </Box>

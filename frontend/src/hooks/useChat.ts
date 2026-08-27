@@ -14,6 +14,7 @@ import {
   normalizePermissionMode,
   type PermissionMode,
 } from "../lib/permissionMode";
+import { useConnectionId } from "./useConnectionId";
 
 export interface StructuredPatchHunk {
   oldStart: number;
@@ -156,7 +157,6 @@ function setAssistantError(message: Message, error: AssistantError): Message {
 export function useChat(
   initialMessages?: Message[],
   initialSessionId?: string | null,
-  conversationKey?: string
 ) {
   const [messages, setMessages] = useState<Message[]>(initialMessages ?? []);
   const [isLoading, setIsLoading] = useState(false);
@@ -171,7 +171,9 @@ export function useChat(
   const [toolProgress, setToolProgress] = useState<ToolProgress | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const sessionIdRef = useRef<string | null>(initialSessionId ?? null);
-  const forceFreshSessionRef = useRef(false);
+  const forceFreshSessionRef = useRef(initialSessionId == null);
+  // タブ単位のconnectionId。サーバー側のセッション分離のため全チャット系APIに付与する。
+  const connectionId = useConnectionId();
 
   // --- モデル / Thinking effort 選択（Docs/仕様-モデル選択.md）---
   const [models, setModels] = useState<ModelInfo[]>([]);
@@ -273,23 +275,13 @@ export function useChat(
     sessionIdRef.current = sessionId;
   }, [sessionId]);
 
-  useEffect(() => {
-    if (abortRef.current) {
-      abortRef.current.abort();
-      abortRef.current = null;
-    }
-    setMessages(initialMessages ?? []);
-    setIsLoading(false);
-    setActivity(null);
-    setSessionState(null);
-    setToolProgress(null);
-    setSessionId(initialSessionId ?? null);
-    sessionIdRef.current = initialSessionId ?? null;
-    forceFreshSessionRef.current = initialSessionId == null;
-    setPendingPermission(null);
-    setPendingQuestion(null);
-    setIsReconnecting(false);
-  }, [conversationKey, initialMessages, initialSessionId]);
+  // アンマウント時に進行中のSSE接続を後始末する。
+  // 会話の切り替え（新規会話・セッション復帰・リポジトリ変更）は RootLayout の
+  // <Chat key={chatKey}> による再マウントで状態が初期化されるため、ここでリセットはしない。
+  useEffect(() => () => {
+    abortRef.current?.abort();
+    abortRef.current = null;
+  }, []);
 
   /** Parse SSE lines from a ReadableStream, calling handler for each event.
    *  onRawData is called on every reader.read() return (including keepalive). */
@@ -394,7 +386,10 @@ export function useChat(
   const attemptReconnect = useCallback(
     async (signal: AbortSignal): Promise<boolean> => {
       try {
-        const res = await fetch("/api/reconnect", { signal });
+        const res = await fetch("/api/reconnect", {
+          signal,
+          headers: { "X-Connection-Id": connectionId },
+        });
         if (!res.ok) return false;
 
         const reader = res.body?.getReader();
@@ -441,7 +436,7 @@ export function useChat(
         return false;
       }
     },
-    [processSSEStream, handleSSEEvent]
+    [processSSEStream, handleSSEEvent, connectionId]
   );
 
   /** Reconnect with retries */
@@ -558,7 +553,7 @@ export function useChat(
       try {
         const res = await fetch("/api/chat", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json", "X-Connection-Id": connectionId },
           body: JSON.stringify({ message, repoId, sessionId: requestSessionId, permissionMode: apiPermissionMode, images: apiImages, model: apiModel, effort: apiEffort }),
           signal: controller.signal,
         });
@@ -625,7 +620,7 @@ export function useChat(
         }
       }
     },
-    [processSSEStream, handleSSEEvent, reconnectWithRetries]
+    [processSSEStream, handleSSEEvent, reconnectWithRetries, connectionId]
   );
 
   const respondPermission = useCallback(
@@ -633,11 +628,11 @@ export function useChat(
       setPendingPermission(null);
       await fetch("/api/permission", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "X-Connection-Id": connectionId },
         body: JSON.stringify({ requestId, approved }),
       });
     },
-    []
+    [connectionId]
   );
 
   const respondQuestion = useCallback(
@@ -649,11 +644,11 @@ export function useChat(
       setPendingQuestion(null);
       await fetch("/api/permission", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "X-Connection-Id": connectionId },
         body: JSON.stringify({ requestId, answers: answers ?? {}, annotations }),
       });
     },
-    []
+    [connectionId]
   );
 
   /** 現在の生成を停止する（UIの脱出口） */
@@ -664,7 +659,10 @@ export function useChat(
     }
     // サーバー側のClaude Codeプロセスもinterrupt
     try {
-      await fetch("/api/interrupt", { method: "POST" });
+      await fetch("/api/interrupt", {
+        method: "POST",
+        headers: { "X-Connection-Id": connectionId },
+      });
     } catch { /* サーバー到達不能でも無視 */ }
     setIsLoading(false);
     setActivity(null);
@@ -672,7 +670,7 @@ export function useChat(
     setToolProgress(null);
     setPendingPermission(null);
     setPendingQuestion(null);
-  }, []);
+  }, [connectionId]);
 
   const resetSession = useCallback(() => {
     setMessages([]);

@@ -61,10 +61,9 @@ export default function FileViewer({ repoId, filePath, onClose }: Props) {
 
   useEffect(() => {
     let cancelled = false;
-    setFetchError(false);
     fetch(apiFilePath(repoId, filePath))
       .then((r) => { if (!r.ok) throw new Error(); return r.json(); })
-      .then((result) => { if (!cancelled) setData(result); })
+      .then((result) => { if (!cancelled) { setData(result); setFetchError(false); } })
       .catch(() => {
         if (cancelled) return;
         setData(null);
@@ -190,13 +189,13 @@ export default function FileViewer({ repoId, filePath, onClose }: Props) {
           </Box>
         ) : !data ? (
           <Box sx={{ display: "flex", justifyContent: "center", py: 4, color: "text.secondary" }}>
-            <Typography fontSize="13px">
+            <Typography sx={{ fontSize: "13px" }}>
               {fetchError ? "サーバーに接続できません" : "ファイルを読み込めませんでした"}
             </Typography>
           </Box>
         ) : data.type === "binary" ? (
           <Box sx={(theme) => ({ display: "flex", justifyContent: "center", py: 4, color: theme.palette.textTertiary })}>
-            <Typography fontSize="13px">{data.message || "バイナリファイルは表示できません"}</Typography>
+            <Typography sx={{ fontSize: "13px" }}>{data.message || "バイナリファイルは表示できません"}</Typography>
           </Box>
         ) : data.type === "image" ? (
           <Box sx={{ display: "flex", justifyContent: "center", alignItems: "center", p: 2, minHeight: 200 }}>

@@ -1,9 +1,19 @@
 import { memo, useCallback, useEffect, useRef } from "react";
 import { Box, Typography } from "@mui/material";
-import ReactMarkdown from "react-markdown";
+import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { Message } from "../hooks/useChat";
 import ToolDiffView from "./ToolDiffView";
+
+/* 列数の多いテーブルは折り返しでは収まらないため、テーブル単体を
+   横スクロールさせてメッセージ枠外へのはみ出しを防ぐ */
+const markdownComponents: Components = {
+  table: ({ children }) => (
+    <Box sx={{ overflowX: "auto" }}>
+      <table>{children}</table>
+    </Box>
+  ),
+};
 
 interface Props {
   messages: Message[];
@@ -72,6 +82,7 @@ export default function MessageList({ messages, isLoading, repoId }: Props) {
     <Box
       ref={scrollRef}
       onScroll={handleScroll}
+      data-testid="message-scroller"
       sx={{
         flex: 1,
         overflow: "auto",
@@ -204,6 +215,10 @@ const AssistantMessage = memo(function AssistantMessage({
         fontSize: "14.5px",
         lineHeight: 1.7,
         color: "text.primary",
+        /* 空白を含まない長いURL・パスがメッセージ枠からはみ出さないようにする。
+           wordBreak は overflow-wrap:anywhere 未対応の旧Safari向けフォールバック */
+        wordBreak: "break-word",
+        overflowWrap: "anywhere",
         /* Markdown styles */
         "& p": {
           m: 0,
@@ -228,6 +243,8 @@ const AssistantMessage = memo(function AssistantMessage({
           borderRadius: "var(--radius-sm)",
           fontWeight: 500,
         },
+        /* 狭い画面では折り返して横スクロールを避け、幅に余裕がある画面では
+           インデントを保つため pre のまま横スクロールさせる */
         "& pre": {
           bgcolor: theme.palette.codeBg,
           p: 2,
@@ -235,6 +252,8 @@ const AssistantMessage = memo(function AssistantMessage({
           overflow: "auto",
           my: 1.5,
           border: `1px solid ${theme.palette.border}`,
+          whiteSpace: { xs: "pre-wrap", sm: "pre" },
+          overflowWrap: { xs: "break-word", sm: "normal" },
         },
         "& pre code": {
           bgcolor: "transparent",
@@ -285,6 +304,8 @@ const AssistantMessage = memo(function AssistantMessage({
           px: 1.5,
           py: 0.75,
           textAlign: "left",
+          /* 継承した anywhere は min-content 幅を1文字まで縮めて列を潰すため打ち消す */
+          overflowWrap: "break-word",
         },
         "& th": {
           bgcolor: theme.palette.bgSecondary,
@@ -316,7 +337,7 @@ const AssistantMessage = memo(function AssistantMessage({
         parts.map((part, index) =>
           part.type === "text" ? (
             part.content.trim() ? (
-              <ReactMarkdown key={index} remarkPlugins={[remarkGfm]}>
+              <ReactMarkdown key={index} remarkPlugins={[remarkGfm]} components={markdownComponents}>
                 {part.content}
               </ReactMarkdown>
             ) : null
@@ -332,7 +353,9 @@ const AssistantMessage = memo(function AssistantMessage({
           )
         )
       ) : fallbackContent.trim() ? (
-        <ReactMarkdown remarkPlugins={[remarkGfm]}>{fallbackContent}</ReactMarkdown>
+        <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
+          {fallbackContent}
+        </ReactMarkdown>
       ) : null}
       {error ? (
         <Box

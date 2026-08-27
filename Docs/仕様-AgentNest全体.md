@@ -10,12 +10,15 @@
 - [画面構成](#画面構成)
   - [UI 要件](#ui-要件)
 - [運用制約](#運用制約)
-  - [シングルセッション制](#シングルセッション制)
+  - [マルチセッション制](#マルチセッション制)
 - [バックエンド API](#バックエンド-api)
+  - [共通: `X-Connection-Id` ヘッダ](#共通-x-connection-id-ヘッダ)
   - [`POST /api/chat`](#post-apichat)
   - [`POST /api/permission`](#post-apipermission)
   - [`GET /api/repos`](#get-apirepos)
   - [`GET /api/status`](#get-apistatus)
+  - [`GET /api/reconnect`](#get-apireconnect)
+  - [`POST /api/interrupt`](#post-apiinterrupt)
 - [設定](#設定)
   - [ベースディレクトリ](#ベースディレクトリ)
 - [Claude Agent SDK 連携](#claude-agent-sdk-連携)
@@ -65,17 +68,38 @@ VSCode を使えないユーザーでも、ブラウザのチャット UI から
 
 ## 運用制約
 
-### シングルセッション制
+### マルチセッション制
 
-サーバは同時に **1つのセッション** のみ処理する。
+サーバは `connectionId` ごとにセッションを分離し、**複数の端末・タブから同時に利用できる**。
 
-- 新しいリクエストが来たら、進行中のセッションを無条件で中断（abort）し、新しいセッションに切り替える
-- 接続が切れた場合（iPhone スリープ、ネットワーク断等）、再接続すると進行中のセッションに復帰できる
+- クライアントはタブ単位で UUID（`connectionId`）を発行し、チャット系 API すべてに HTTP ヘッダ `X-Connection-Id` で載せる
+- 同じ `connectionId` から新しいリクエストが来たときだけ、そのセッションを中断して切り替える。他の `connectionId` のセッションには影響しない
+- 接続が切れた場合（iPhone スリープ、ネットワーク断等）、同じ `connectionId` を付けて `GET /api/reconnect` すると、自分のセッションにだけ復帰できる
+- セッション状態はサーバのインメモリで保持し、永続化しない。サーバを再起動すると実行中の状態は失われる（会話履歴は Claude Code CLI の JSONL に残るため、会話の再開自体は可能）
+- 完了済みで購読者のいないセッションは一定時間後に破棄され、同時セッション数にも上限がある
+- **認証は行わない**。Tailscale VPN の内側で使う前提であり、`connectionId` はセッションの分離が目的でアクセス制御ではない
 - セッションがハングした場合は、サーバを再起動して復旧する（Tailscale SSH 経由）
 
 ---
 
 ## バックエンド API
+
+### 共通: `X-Connection-Id` ヘッダ
+
+チャット系 API（`/api/chat`・`/api/reconnect`・`/api/permission`・`/api/interrupt`・`/api/status`）は、
+リクエストヘッダ `X-Connection-Id` にクライアントが発行した UUID を必要とする。サーバはこの値をキーに
+セッションを分離する。欠落している場合や UUID 形式でない場合は `400` を返す。
+
+ただし `GET /api/status` だけは例外で、ヘッダが無ければ `400` ではなく `{ "active": false }` を返す。
+Tauri の内蔵サーバ起動待ち（`src-tauri/src/server.rs` の `wait_for_server`）がこのエンドポイントを
+ヘルスチェックとして使っており、ヘッダを送らないため。
+
+```
+X-Connection-Id: 11111111-1111-1111-1111-111111111111
+```
+
+クライアントはタブ単位でこの値を `sessionStorage`（キー `agentnest.connectionId`）に保持する
+（`frontend/src/hooks/useConnectionId.ts`）。
 
 ### `POST /api/chat`
 
@@ -126,7 +150,7 @@ data: {"type": "done", "sessionId": "abc-123"}
 
 ### `GET /api/status`
 
-現在のセッション状態を返す（再接続時に使用）。
+`X-Connection-Id` で指定したセッションの状態を返す（再接続時に使用）。他の接続のセッション情報は返らない。
 
 **レスポンス:**
 ```json
@@ -137,6 +161,32 @@ data: {"type": "done", "sessionId": "abc-123"}
   "pendingPermission": null
 }
 ```
+
+### `GET /api/reconnect`
+
+切断中に進んでいた分の状態スナップショットを受け取り、以降のイベントを購読し直す。
+`X-Connection-Id` で指定したセッションにのみ接続する。該当セッションが無ければ `404`。
+
+**レスポンス:** SSE ストリーム。先頭に現在の状態がまとめて送られ、以降は `/api/chat` と同じイベントが続く。
+```
+data: {"type": "reconnect_state", "sessionId": "abc-123", "assistantMessage": {...}, "pendingPermission": null, "completed": false}
+data: {"type": "text", "content": "続きの応答..."}
+data: {"type": "done", "sessionId": "abc-123"}
+```
+
+### `POST /api/interrupt`
+
+`X-Connection-Id` で指定したセッションの実行中クエリに割り込む。他の接続のセッションは停止しない。
+
+**レスポンス:**
+```json
+{
+  "interrupted": true,
+  "stillQueued": []
+}
+```
+
+`stillQueued` は割り込み後も残る非同期メッセージの uuid。非空なら停止しきれていないことを意味する。
 
 ---
 

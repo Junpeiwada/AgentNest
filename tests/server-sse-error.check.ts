@@ -25,7 +25,7 @@ const mockExpand: ExpandSlashCommandFn = async (message) => ({
 
 /** executeChat が想定外例外を投げるモック */
 const throwingExecuteChat: ExecuteChatFn = async (
-  _message, _repoId, _repoPath, _sessionId, _permissionMode, callbacks,
+  _connectionId, _message, _repoId, _repoPath, _sessionId, _permissionMode, callbacks,
 ) => {
   // onText で少しだけデータを送った後に例外
   callbacks.onText("Hello");
@@ -34,7 +34,7 @@ const throwingExecuteChat: ExecuteChatFn = async (
 
 /** executeChat が正常に完了するモック */
 const normalExecuteChat: ExecuteChatFn = async (
-  _message, _repoId, _repoPath, _sessionId, _permissionMode, callbacks,
+  _connectionId, _message, _repoId, _repoPath, _sessionId, _permissionMode, callbacks,
 ) => {
   callbacks.onSessionId("test-session");
   callbacks.onText("Hello");
@@ -70,7 +70,7 @@ async function requestChat(server: Server, timeoutMs = 2000): Promise<SSEResult>
 
   const res = await fetch(`http://localhost:${addr.port}/api/chat`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", "X-Connection-Id": "11111111-1111-1111-1111-111111111111" },
     body: JSON.stringify({ message: "test", repoId: "test" }),
     signal: controller.signal,
   });

@@ -61,11 +61,8 @@ export default function GitPage() {
 
   const stagedCount = git.status?.files.filter((f) => f.staged).length ?? 0;
   const error = git.error || history.error;
-  const [snackbarOpen, setSnackbarOpen] = useState(false);
-
-  useEffect(() => {
-    if (error) setSnackbarOpen(true);
-  }, [error]);
+  const [dismissedError, setDismissedError] = useState<string | null>(null);
+  const snackbarOpen = !!error && error !== dismissedError;
 
   if (git.loading && !git.status) {
     return (
@@ -186,9 +183,9 @@ export default function GitPage() {
 
       {/* エラー Snackbar */}
       <Snackbar
-        open={snackbarOpen && !!error}
+        open={snackbarOpen}
         autoHideDuration={5000}
-        onClose={() => setSnackbarOpen(false)}
+        onClose={() => setDismissedError(error)}
         anchorOrigin={{ vertical: "top", horizontal: "center" }}
       >
         <Alert severity="error" variant="filled" sx={{ width: "100%" }}>

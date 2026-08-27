@@ -1,4 +1,4 @@
-import { useState, useEffect, useLayoutEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useLayoutEffect, useCallback, useRef, useSyncExternalStore } from "react";
 import {
   Box,
   List,
@@ -55,6 +55,15 @@ function formatSize(bytes: number): string {
 
 type ViewMode = "directory" | "file" | "loading" | "error";
 
+/** 取得結果。key は `${repoId}:${currentPath}` で、どのパスに対する結果かを示す。 */
+type FetchResult =
+  | { key: string; mode: "directory"; entries: FileEntry[] }
+  | { key: string; mode: "file" }
+  | { key: string; mode: "error" };
+
+/** entries の派生値で使う空配列。毎レンダー新しい配列を作ると依存が変わってしまうため定数にする。 */
+const EMPTY_ENTRIES: FileEntry[] = [];
+
 // パスごとのスクロール位置をセッション中保持する（タブを閉じるまで有効）
 const SCROLL_STORAGE_KEY = "fileExplorerScroll";
 // 保持するエントリ数の上限。超えたら古いものから破棄しsessionStorageの肥大化を防ぐ
@@ -108,6 +117,7 @@ function saveLastTap(key: string, path: string) {
       delete taps[keys[0]];
     }
     sessionStorage.setItem(LAST_TAP_STORAGE_KEY, JSON.stringify(taps));
+    notifyLastTaps();
   } catch {
     /* 無視 */
   }
@@ -121,27 +131,74 @@ function consumeLastTap(key: string): string | null {
     if (path == null) return null;
     delete taps[key];
     sessionStorage.setItem(LAST_TAP_STORAGE_KEY, JSON.stringify(taps));
+    notifyLastTaps();
     return path;
   } catch {
     return null;
   }
 }
 
+// sessionStorage上のタップ記録をReactから購読するための小さなストア。
+// useSyncExternalStoreのgetSnapshotは内容が同じなら同一参照を返す必要があるため、
+// 生JSONをキャッシュし、変化したときだけパースし直す。
+const tapListeners = new Set<() => void>();
+let tapCache: { raw: string | null; parsed: Record<string, string> } = { raw: null, parsed: {} };
+
+function subscribeLastTaps(listener: () => void): () => void {
+  tapListeners.add(listener);
+  return () => {
+    tapListeners.delete(listener);
+  };
+}
+
+function getLastTapsSnapshot(): Record<string, string> {
+  let raw: string | null;
+  try {
+    raw = sessionStorage.getItem(LAST_TAP_STORAGE_KEY);
+  } catch {
+    raw = null;
+  }
+  if (raw !== tapCache.raw) {
+    let parsed: Record<string, string> = {};
+    if (raw) {
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        parsed = {};
+      }
+    }
+    tapCache = { raw, parsed };
+  }
+  return tapCache.parsed;
+}
+
+function notifyLastTaps(): void {
+  for (const listener of tapListeners) listener();
+}
+
 export default function FileExplorer({ repoId, currentPath, onNavigate }: Props) {
   const theme = useTheme();
-  const [entries, setEntries] = useState<FileEntry[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [viewMode, setViewMode] = useState<ViewMode>("loading");
-  const [fetchError, setFetchError] = useState(false);
+  const [result, setResult] = useState<FetchResult | null>(null);
   const listScrollRef = useRef<HTMLDivElement>(null);
   const scrollKey = `${repoId}:${currentPath}`;
+  // 取得結果からの派生値。scrollKeyと一致する結果だけを「確定」とみなすため、
+  // パス切り替え直後は自動的に loading 扱いになり、前のディレクトリの内容は見えない。
+  const settled = result?.key === scrollKey ? result : null;
+  const loading = settled === null;
+  const viewMode: ViewMode = settled ? settled.mode : "loading";
+  const entries = settled?.mode === "directory" ? settled.entries : EMPTY_ENTRIES;
+  const fetchError = settled?.mode === "error";
   // スクロール中はメモリに最新値を保持し、sessionStorageへの書き込みはデバウンスする
   const pendingScroll = useRef<{ key: string; top: number } | null>(null);
   const flushTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // 戻ってきたときにiOS風ハイライト→フェードさせる対象のentry path。
   // 対象セルに@keyframesアニメ（最初から色が載っていてフェードアウトするだけ）を当てる。
-  const [highlightPath, setHighlightPath] = useState<string | null>(null);
-  const highlightTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // sessionStorage上のタップ記録を購読し、そこからの純粋な導出で対象を決める。
+  // 記録の消費はセルのonAnimationEndで行うため、解除用のstateもタイマーも持たない。
+  const lastTaps = useSyncExternalStore(subscribeLastTaps, getLastTapsSnapshot);
+  const tappedPath = settled?.mode === "directory" ? lastTaps[scrollKey] ?? null : null;
+  const highlightPath =
+    tappedPath && entries.some((e) => e.path === tappedPath) ? tappedPath : null;
 
   // 保留中のスクロール位置を即座にsessionStorageへ書き出す
   const flushScroll = useCallback(() => {
@@ -171,43 +228,35 @@ export default function FileExplorer({ repoId, currentPath, onNavigate }: Props)
   // アンマウント時に保留分を書き出す
   useEffect(() => () => flushScroll(), [flushScroll]);
 
-  // currentPathがディレクトリかファイルかを判定しつつデータを取得
-  const fetchPath = useCallback(async (pathStr: string) => {
-    if (!repoId) return;
-    setLoading(true);
-    setFetchError(false);
-
-    try {
-      const res = await fetch(apiFilesPath(repoId, pathStr));
-
-      if (res.ok) {
-        const data: FileEntry[] = await res.json();
-        setEntries(data);
-        setViewMode("directory");
-      } else {
-        const errorBody = await res.json().catch(() => null);
-        if (res.status === 400 && errorBody?.error === "Not a directory") {
-          // ディレクトリでなければファイルとみなす
-          setViewMode("file");
-        } else {
-          setEntries([]);
-          setFetchError(true);
-          setViewMode("error");
-        }
-      }
-    } catch {
-      setEntries([]);
-      setFetchError(true);
-      setViewMode("error");
-    } finally {
-      setLoading(false);
-    }
-  }, [repoId]);
-
+  // currentPathがディレクトリかファイルかを判定しつつデータを取得する。
+  // 取得結果は「どのキーに対する結果か」を持たせて1つのstateへ集約し、
+  // loading/viewMode/entries/fetchError はそこからの派生値にする。
+  // 取得開始時に同期でsetStateしないことで、effect起点の連鎖レンダーを避ける。
   useEffect(() => {
-    setViewMode("loading");
-    if (repoId) fetchPath(currentPath);
-  }, [repoId, currentPath, fetchPath]);
+    if (!repoId) return;
+    let cancelled = false;
+    const key = `${repoId}:${currentPath}`;
+    (async (): Promise<FetchResult> => {
+      try {
+        const res = await fetch(apiFilesPath(repoId, currentPath));
+        if (res.ok) {
+          const data: FileEntry[] = await res.json();
+          return { key, mode: "directory", entries: data };
+        }
+        const errorBody = await res.json().catch(() => null);
+        // ディレクトリでなければファイルとみなす
+        if (res.status === 400 && errorBody?.error === "Not a directory") {
+          return { key, mode: "file" };
+        }
+        return { key, mode: "error" };
+      } catch {
+        return { key, mode: "error" };
+      }
+    })().then((r) => {
+      if (!cancelled) setResult(r);
+    });
+    return () => { cancelled = true; };
+  }, [repoId, currentPath]);
 
   // ディレクトリ表示が確定したら、描画反映前（レイアウト確定時）にスクロール位置を復元する。
   // scrollKey単位で復元するため依存はscrollKey/viewMode/loadingに絞る（entriesでの再復元を避ける）。
@@ -218,34 +267,6 @@ export default function FileExplorer({ repoId, currentPath, onNavigate }: Props)
     const saved = loadScrollPositions()[scrollKey];
     if (saved != null) el.scrollTop = saved;
   }, [viewMode, loading, scrollKey]);
-
-  // 戻ってきてこのディレクトリの一覧が出揃ったら、最後にタップしたセルを
-  // iOS風に一瞬ハイライトしてフェードアウトさせる（消費したら記録はクリア）。
-  // 「いま表示しているディレクトリ（currentPath）」を基準に発火する。子へ進む際に
-  // 記録するキーは"進む前のディレクトリ"なので、子表示中にそのキーを覗いても一致せず、
-  // 親へ戻ったときに初めて一致して発火する。
-  useEffect(() => {
-    // ディレクトリの中身が確定したタイミングでのみ判定する。
-    // entriesに対象pathが含まれること=「いま表示中のディレクトリの中身」である保証になり、
-    // 子へ進む途中の中間レンダー（entriesがまだ親/未確定）では消費されない。
-    if (viewMode !== "directory" || loading) return;
-    const tapped = loadLastTaps()[scrollKey];
-    if (tapped == null || !entries.some((e) => e.path === tapped)) return;
-    // ここで初めて消費（削除）する。発火が確定した瞬間だけなので早期消費は起きない。
-    consumeLastTap(scrollKey);
-    setHighlightPath(tapped);
-    if (highlightTimer.current) clearTimeout(highlightTimer.current);
-    // アニメ完了後に対象を片付ける（再描画でanimationが再発火しないように）
-    highlightTimer.current = setTimeout(() => {
-      setHighlightPath(null);
-      highlightTimer.current = null;
-    }, 1100);
-  }, [viewMode, loading, scrollKey, entries]);
-
-  // アンマウント時にハイライト用タイマーを掃除する
-  useEffect(() => () => {
-    if (highlightTimer.current) clearTimeout(highlightTimer.current);
-  }, []);
 
   const handleEntryClick = (entry: FileEntry) => {
     // 移動前に現在のスクロール位置を確実に書き出しておく
@@ -263,7 +284,7 @@ export default function FileExplorer({ repoId, currentPath, onNavigate }: Props)
   if (!repoId) {
     return (
       <Box sx={{ display: "flex", alignItems: "center", justifyContent: "center", flex: 1, color: "text.secondary" }}>
-        <Typography fontSize="14px">リポジトリを選択してください</Typography>
+        <Typography sx={{ fontSize: "14px" }}>リポジトリを選択してください</Typography>
       </Box>
     );
   }
@@ -343,7 +364,7 @@ export default function FileExplorer({ repoId, currentPath, onNavigate }: Props)
           </Box>
         ) : entries.length === 0 ? (
           <Box sx={{ display: "flex", justifyContent: "center", py: 4, color: theme.palette.textTertiary }}>
-            <Typography fontSize="13px">
+            <Typography sx={{ fontSize: "13px" }}>
               {fetchError ? "サーバーに接続できません" : "空のディレクトリです"}
             </Typography>
           </Box>
@@ -355,6 +376,9 @@ export default function FileExplorer({ repoId, currentPath, onNavigate }: Props)
               <ListItemButton
                 key={entry.path}
                 onClick={() => handleEntryClick(entry)}
+                // ハイライトの消費（記録の削除）はアニメーション終了時に行う。
+                // これで解除用のタイマーを持たずに済み、CSS側の長さと必ず一致する。
+                onAnimationEnd={isHighlighted ? () => consumeLastTap(scrollKey) : undefined}
                 sx={(t) => ({
                   py: { xs: 1.25, sm: 0.75 },
                   px: { xs: 1.5, sm: 2 },
@@ -376,12 +400,12 @@ export default function FileExplorer({ repoId, currentPath, onNavigate }: Props)
                 </ListItemIcon>
                 <ListItemText
                   primary={entry.name}
-                  primaryTypographyProps={{
+                  slotProps={{ primary: { sx: {
                     fontSize: { xs: "14px", sm: "13px" },
                     fontWeight: 400,
                     fontFamily: "var(--font-mono)",
                     color: "text.primary",
-                  }}
+                  } } }}
                 />
                 {entry.type === "file" && entry.size != null && (
                   <Typography sx={{ fontSize: "11px", color: theme.palette.textTertiary, ml: 1, flexShrink: 0 }}>

@@ -52,7 +52,7 @@ export function getCachedModels(): ModelInfo[] {
 
 /**
  * モデル一覧をプリフェッチしてメモリにキャッシュする。
- * 使い捨ての query() を起動し supportedModels() を呼ぶ（チャット用の currentSession/currentStream には触れない）。
+ * 使い捨ての query() を起動し supportedModels() を呼ぶ（チャット用の sessions Map には触れない）。
  * supportedModels() はサブプロセス初期化時のメタ情報取得であり、空プロンプトでもLLM推論は発火しない。
  * 成功するまでは modelsPrefetched を立てないため、起動時にCLI未準備でも GET /api/models 経由で自動回復できる。
  * 失敗してもサーバは正常動作させる（空配列のまま縮退）。
@@ -146,12 +146,23 @@ export interface AssistantMessageState {
 }
 
 export interface Session {
+  // マルチセッション対応: 接続（タブ・端末）ごとに一意なID。sessions Map のキーと同値を保持する。
+  connectionId: string;
   repoId: string;
   repoPath: string;
   sessionId: string | null;
   pendingPermission: PendingPermission | null;
   pendingQuestion: PendingQuestion | null;
   abortController: AbortController;
+  // SDKが公開する Query 型をそのまま使う（interrupt() 等のシグネチャ変更に追従するため、
+  // 構造的型を手書きしない）。runQuery内でquery()呼び出し後に設定される。
+  stream: Query | null;
+  // 最終アクティブ時刻（GC判定に使用）。イベント発火のたびに更新する。
+  lastActiveAt: number;
+  // このセッションに属する canUseTool の Promise resolver。
+  // セッションごとに分離することで、他セッションの requestId を誤って解決できないようにする。
+  permissionResolvers: Map<string, { resolve: (result: PermissionResult) => void; input: Record<string, unknown> }>;
+  questionResolvers: Map<string, { resolve: (result: PermissionResult) => void; questions: QuestionItem[] }>;
   // Reconnection support
   assistantMessage: AssistantMessageState;
   listeners: Set<(data: SessionEvent) => void>;
@@ -161,22 +172,20 @@ export interface Session {
 }
 
 function notifyListeners(session: Session, event: SessionEvent): void {
+  session.lastActiveAt = Date.now();
   for (const listener of session.listeners) {
     try { listener(event); } catch {}
   }
 }
 
-export function subscribeToSession(): {
+export function subscribeToSession(connectionId: string): {
   session: Session;
   unsubscribe: () => void;
   addListener: (fn: (data: SessionEvent) => void) => void;
 } | null {
-  if (!currentSession) return null;
-  const session = currentSession;
+  const session = sessions.get(connectionId);
+  if (!session) return null;
   const listeners = new Set<(data: SessionEvent) => void>();
-  for (const fn of listeners) {
-    session.listeners.add(fn);
-  }
   return {
     session,
     addListener: (fn) => {
@@ -212,28 +221,102 @@ function formatToolActivity(toolName: string, input: Record<string, unknown>): s
   }
 }
 
-let currentSession: Session | null = null;
-// SDKが公開する Query 型をそのまま使う（interrupt() 等のシグネチャ変更に追従するため、
-// 構造的型を手書きしない）。
-let currentStream: Query | null = null;
-const permissionResolvers = new Map<string, { resolve: (result: PermissionResult) => void; input: Record<string, unknown> }>();
-const questionResolvers = new Map<string, { resolve: (result: PermissionResult) => void; questions: QuestionItem[] }>();
+// connectionId（接続=タブ・端末ごとのUUID）をキーにセッションを分離する。
+// 旧来の単一グローバル currentSession/currentStream は廃止し、同時に複数セッションを保持できるようにする。
+const sessions = new Map<string, Session>();
 
-export function getSession(): Session | null {
-  return currentSession;
+// 同時保持セッション数の上限。超過時はまず完了済みの古いものから、それでも足りなければ
+// 実行中の最も古いものを中断して破棄する。
+// なお gcSessions() は新規セッションを登録する「前」に走るため、実際の同時保持数は最大 21 になる。
+const SESSION_MAX_COUNT = 20;
+// 完了済み・購読者なしのセッションを最終アクティブからこの時間経過で破棄する。
+const SESSION_GC_TTL_MS = 10 * 60 * 1000; // 10分
+// 実行中(completed=false)のまま無音が続くセッションを強制終了するまでの時間。
+// 権限ダイアログを出したまま answering されず切断されると canUseTool の Promise が未解決のまま
+// セッションもCLI子プロセスも生き続けるため、ハード寿命を設ける。
+const RUNNING_SESSION_MAX_IDLE_MS = 2 * 60 * 60 * 1000; // 2時間
+
+/**
+ * セッションのガベージコレクション。
+ * setIntervalは使わず（タイマーを増やさないため）、新規セッション作成のタイミングでのみ実行する。
+ * 1. 完了済み(completed=true)かつ購読者(listeners)が空のセッションを、最終アクティブから10分経過で破棄
+ * 2. 実行中のまま2時間無音のセッションを abort して破棄（権限待ちの放置などで永久に残るのを防ぐ）
+ * 3. 同時セッション数が上限(20)を超えている場合、完了済みの最古から破棄。
+ *    それでも超過するなら実行中の最古を abort して破棄する（子プロセスが際限なく増えるのを防ぐ）
+ */
+function gcSessions(): void {
+  const now = Date.now();
+  for (const [connectionId, session] of sessions) {
+    if (session.completed && session.listeners.size === 0 && now - session.lastActiveAt > SESSION_GC_TTL_MS) {
+      sessions.delete(connectionId);
+      log("SESSION_GC_EXPIRED", { connectionId, sessionId: session.sessionId });
+      continue;
+    }
+    if (!session.completed && now - session.lastActiveAt > RUNNING_SESSION_MAX_IDLE_MS) {
+      log("SESSION_GC_STALE_RUNNING", {
+        connectionId,
+        sessionId: session.sessionId,
+        idleMs: now - session.lastActiveAt,
+      });
+      session.abortController.abort(); // CLI子プロセスを確実に落とす
+      sessions.delete(connectionId);
+    }
+  }
+
+  if (sessions.size > SESSION_MAX_COUNT) {
+    // 「完了済みを古い順」→「実行中を古い順」の優先度で落とす。
+    const byPriority = [...sessions.entries()].sort((a, b) => {
+      if (a[1].completed !== b[1].completed) return a[1].completed ? -1 : 1;
+      return a[1].lastActiveAt - b[1].lastActiveAt;
+    });
+    for (const [connectionId, session] of byPriority) {
+      if (sessions.size <= SESSION_MAX_COUNT) break;
+      if (session.completed) {
+        log("SESSION_GC_OVERFLOW", { connectionId, sessionId: session.sessionId });
+      } else {
+        // 実行中を落とすのは最後の手段。子プロセスを止めてから消す。
+        session.abortController.abort();
+        log("SESSION_GC_OVERFLOW_RUNNING", { connectionId, sessionId: session.sessionId });
+      }
+      sessions.delete(connectionId);
+    }
+  }
 }
 
-export function abortCurrentSession(): void {
-  if (currentSession) {
+/**
+ * 外部入力（HTTPヘッダ `X-Connection-Id`）をサーバ側の信頼境界で検証する。
+ * UUID形式（8-4-4-4-12の16進、大文字小文字問わず）のみ許可し、それ以外は null を返す。
+ * ルーティング層はこれを使い、null であれば 400 を返す。
+ */
+const CONNECTION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+export function sanitizeConnectionId(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  return CONNECTION_ID_PATTERN.test(value) ? value : null;
+}
+
+export function getSession(connectionId: string): Session | null {
+  return sessions.get(connectionId) ?? null;
+}
+
+/**
+ * 指定 connectionId のセッションのみを中断する。他 connectionId のセッションには一切触れない
+ * （これが今回のマルチセッション対応の核心。他タブ・他端末の実行を巻き込んで止めてはならない）。
+ *
+ * なお Map からエントリは削除しない。唯一の呼び出し元である executeChat が直後に
+ * sessions.set() で同じキーを上書きする前提のため。別の用途からこれを単体で呼ぶ場合は、
+ * abort済みの死んだセッションが /api/status に active:true で見えてしまう点に注意すること。
+ */
+export function abortSession(connectionId: string): void {
+  const session = sessions.get(connectionId);
+  if (session) {
     log("SESSION_ABORT_CALLED", {
-      sessionId: currentSession.sessionId,
-      repoId: currentSession.repoId,
-      completed: currentSession.completed,
-      partsCount: currentSession.assistantMessage.parts.length,
+      connectionId,
+      sessionId: session.sessionId,
+      repoId: session.repoId,
+      completed: session.completed,
+      partsCount: session.assistantMessage.parts.length,
     });
-    currentSession.abortController.abort();
-    currentSession = null;
-    currentStream = null;
+    session.abortController.abort();
   }
 }
 
@@ -248,24 +331,39 @@ export interface InterruptResult {
 }
 
 /**
- * 実行中セッションに割り込む。
+ * 指定 connectionId のセッションに割り込む。
  *
- * Query.interrupt() は必須メソッドなので存在チェックは不要で、currentStream の null 判定のみ行う。
+ * Query.interrupt() は必須メソッドなので存在チェックは不要で、session.stream の null 判定のみ行う。
  * 戻り値の受領票は握り潰さず still_queued をそのまま返す（キューに残る処理があるのに
  * 「停止した」と報告してしまうのを避けるため）。
  */
-export async function interruptSession(): Promise<InterruptResult> {
-  if (!currentStream) return { interrupted: false, stillQueued: [] };
-  const receipt = await currentStream.interrupt(); // 旧CLIでは undefined
-  const stillQueued = receipt?.still_queued ?? [];
-  if (stillQueued.length > 0) {
-    log("INTERRUPT_STILL_QUEUED", { stillQueued });
+export async function interruptSession(connectionId: string): Promise<InterruptResult> {
+  const session = sessions.get(connectionId);
+  // 完了済みセッションは再接続のため最長10分Mapに残る。その stream に interrupt() を投げると
+  // 子プロセスが既に終了していて制御応答が返らず、Promise が解決しないまま
+  // /api/interrupt がレスポンスを返せなくなる（フロント側の停止ボタンが消えなくなる）。
+  if (!session || !session.stream || session.completed) {
+    return { interrupted: false, stillQueued: [] };
   }
-  return { interrupted: true, stillQueued };
+  try {
+    const receipt = await session.stream.interrupt(); // 旧CLIでは undefined
+    const stillQueued = receipt?.still_queued ?? [];
+    if (stillQueued.length > 0) {
+      log("INTERRUPT_STILL_QUEUED", { connectionId, stillQueued });
+    }
+    return { interrupted: true, stillQueued };
+  } catch (err: any) {
+    // 子プロセスが既に落ちている等。停止できなかったことを返し、リクエストは必ず完了させる。
+    log("INTERRUPT_ERROR", { connectionId, name: err?.name, message: err?.message });
+    return { interrupted: false, stillQueued: [] };
+  }
 }
 
-export function resolvePermission(requestId: string, approved: boolean): boolean {
-  const entry = permissionResolvers.get(requestId);
+/** 指定 connectionId のセッションに属する requestId のみ解決する。他セッションのものは解決できない。 */
+export function resolvePermission(connectionId: string, requestId: string, approved: boolean): boolean {
+  const session = sessions.get(connectionId);
+  if (!session) return false;
+  const entry = session.permissionResolvers.get(requestId);
   if (!entry) return false;
 
   if (approved) {
@@ -274,20 +372,22 @@ export function resolvePermission(requestId: string, approved: boolean): boolean
     entry.resolve({ behavior: "deny", message: "User denied this action", interrupt: true });
   }
 
-  permissionResolvers.delete(requestId);
-  if (currentSession) {
-    currentSession.pendingPermission = null;
-  }
+  session.permissionResolvers.delete(requestId);
+  session.pendingPermission = null;
   return true;
 }
 
+/** 指定 connectionId のセッションに属する requestId のみ解決する。他セッションのものは解決できない。 */
 export function resolveQuestion(
+  connectionId: string,
   requestId: string,
   answers: Record<string, string>,
   annotations?: Record<string, { notes?: string }>,
   deny?: boolean
 ): boolean {
-  const entry = questionResolvers.get(requestId);
+  const session = sessions.get(connectionId);
+  if (!session) return false;
+  const entry = session.questionResolvers.get(requestId);
   if (!entry) return false;
 
   if (deny) {
@@ -298,9 +398,9 @@ export function resolveQuestion(
     entry.resolve({ behavior: "allow", updatedInput });
   }
 
-  questionResolvers.delete(requestId);
-  if (currentSession && currentSession.pendingQuestion?.requestId === requestId) {
-    currentSession.pendingQuestion = null;
+  session.questionResolvers.delete(requestId);
+  if (session.pendingQuestion?.requestId === requestId) {
+    session.pendingQuestion = null;
   }
   return true;
 }
@@ -393,6 +493,7 @@ export function sanitizeModelOptions(input: unknown): ModelOptions {
 }
 
 export async function executeChat(
+  connectionId: string,
   message: string,
   repoId: string,
   repoPath: string,
@@ -402,17 +503,25 @@ export async function executeChat(
   images?: ImageData[],
   modelOptions?: ModelOptions
 ): Promise<void> {
-  // Abort any existing session
-  abortCurrentSession();
+  // 同じ connectionId の既存セッションのみ中断する。他 connectionId（他タブ・他端末）のセッションは
+  // 絶対に止めない — これがマルチセッション対応の核心。
+  abortSession(connectionId);
+  // 新規セッション作成のタイミングでのみGCを行う（setIntervalによるタイマーは増やさない）
+  gcSessions();
 
   const abortController = new AbortController();
   const session: Session = {
+    connectionId,
     repoId,
     repoPath,
     sessionId: resumeSessionId,
     pendingPermission: null,
     pendingQuestion: null,
     abortController,
+    stream: null,
+    lastActiveAt: Date.now(),
+    permissionResolvers: new Map(),
+    questionResolvers: new Map(),
     assistantMessage: {
       role: "assistant",
       content: "",
@@ -424,11 +533,11 @@ export async function executeChat(
     leadingTextBuffer: "",
     leadingTextPending: true,
   };
-  currentSession = session;
+  sessions.set(connectionId, session);
   const stderrBuffer: string[] = [];
 
-  log("SESSION_CREATE", { repoId, repoPath, resumeSessionId, sessionRef: "active" });
-  log("REQUEST", { message: message.slice(0, 200), repoId, repoPath, resumeSessionId });
+  log("SESSION_CREATE", { connectionId, repoId, repoPath, resumeSessionId, sessionRef: "active" });
+  log("REQUEST", { connectionId, message: message.slice(0, 200), repoId, repoPath, resumeSessionId });
 
   // Wrap callbacks to also accumulate state and notify reconnect listeners
   const wrappedCallbacks: ChatCallbacks = {
@@ -506,38 +615,38 @@ export async function executeChat(
 
   try {
     await runQuery(message, repoPath, abortController, resumeSessionId, permissionMode, session, wrappedCallbacks, stderrBuffer, images, modelOptions);
-    log("SESSION_COMPLETE", { sessionId: session.sessionId, repoId, partsCount: session.assistantMessage.parts.length });
+    log("SESSION_COMPLETE", { connectionId, sessionId: session.sessionId, repoId, partsCount: session.assistantMessage.parts.length });
     wrappedCallbacks.onDone(session.sessionId);
   } catch (err: any) {
     if (err.name === "AbortError" || abortController.signal.aborted) {
-      log("SESSION_ABORTED", { sessionId: session.sessionId, repoId });
+      log("SESSION_ABORTED", { connectionId, sessionId: session.sessionId, repoId });
       wrappedCallbacks.onDone(session.sessionId);
       return;
     }
 
     // resume失敗時はsessionIdなしでリトライ
     if (resumeSessionId && String(err.message).includes("exited with code 1")) {
-      log("RETRY", "resume failed, retrying without sessionId");
+      log("RETRY", { connectionId, message: "resume failed, retrying without sessionId" });
       session.sessionId = null;
       try {
         stderrBuffer.length = 0;
         await runQuery(message, repoPath, abortController, null, permissionMode, session, wrappedCallbacks, stderrBuffer, images, modelOptions);
-        log("SESSION_COMPLETE", { sessionId: session.sessionId, repoId, partsCount: session.assistantMessage.parts.length, retried: true });
+        log("SESSION_COMPLETE", { connectionId, sessionId: session.sessionId, repoId, partsCount: session.assistantMessage.parts.length, retried: true });
         wrappedCallbacks.onDone(session.sessionId);
         return;
       } catch (retryErr: any) {
         if (retryErr.name === "AbortError" || abortController.signal.aborted) {
-          log("SESSION_ABORTED", { sessionId: session.sessionId, repoId, retried: true });
+          log("SESSION_ABORTED", { connectionId, sessionId: session.sessionId, repoId, retried: true });
           wrappedCallbacks.onDone(session.sessionId);
           return;
         }
-        log("SESSION_ERROR", { name: retryErr.name, message: retryErr.message, stack: retryErr.stack, retried: true });
+        log("SESSION_ERROR", { connectionId, name: retryErr.name, message: retryErr.message, stack: retryErr.stack, retried: true });
         wrappedCallbacks.onError(normalizeChatError(retryErr, stderrBuffer));
         return;
       }
     }
 
-    log("SESSION_ERROR", { name: err.name, message: err.message, stack: err.stack });
+    log("SESSION_ERROR", { connectionId, name: err.name, message: err.message, stack: err.stack });
     wrappedCallbacks.onError(normalizeChatError(err, stderrBuffer));
   }
 }
@@ -669,7 +778,7 @@ async function runQuery(
     ? createImagePrompt(message, images)
     : message;
 
-  const stream = currentStream = query({
+  const stream = query({
     prompt,
     options: {
       cwd: repoPath,
@@ -688,29 +797,29 @@ async function runQuery(
       // ユーザー環境の Claude Code CLI を使う（SDK同梱バイナリは非同梱）
       ...(CLAUDE_CLI_PATH ? { pathToClaudeCodeExecutable: CLAUDE_CLI_PATH } : {}),
       stderr: (data: string) => {
-        log("STDERR", data);
+        log("STDERR", { connectionId: session.connectionId, data });
         stderrBuffer.push(data);
       },
       canUseTool: async (toolName, input, { signal }) => {
-        log("TOOL", { toolName, permissionMode, inputKeys: Object.keys(input) });
+        log("TOOL", { connectionId: session.connectionId, toolName, permissionMode, inputKeys: Object.keys(input) });
 
         // AskUserQuestion: 質問ダイアログを表示してユーザーの回答を待つ
         if (toolName === "AskUserQuestion") {
           const questions = Array.isArray(input.questions) ? (input.questions as QuestionItem[]) : [];
           if (questions.length === 0) {
-            log("ASK_USER_QUESTION_EMPTY", { toolName });
+            log("ASK_USER_QUESTION_EMPTY", { connectionId: session.connectionId, toolName });
             return { behavior: "allow" as const, updatedInput: { questions: [], answers: {} } };
           }
           return new Promise<PermissionResult>((resolve) => {
             const requestId = randomUUID();
             const pendingQ: PendingQuestion = { requestId, questions };
             session.pendingQuestion = pendingQ;
-            questionResolvers.set(requestId, { resolve, questions });
+            session.questionResolvers.set(requestId, { resolve, questions });
             callbacks.onQuestion(pendingQ);
 
             signal.addEventListener("abort", () => {
-              if (questionResolvers.has(requestId)) {
-                questionResolvers.delete(requestId);
+              if (session.questionResolvers.has(requestId)) {
+                session.questionResolvers.delete(requestId);
                 resolve({ behavior: "deny", message: "Session aborted" });
               }
             });
@@ -722,7 +831,7 @@ async function runQuery(
         if (permissionMode === "acceptEdits") {
           const autoApproveTools = ["Edit", "Write", "MultiEdit"];
           if (autoApproveTools.includes(toolName)) {
-            log("AUTO_APPROVE", toolName);
+            log("AUTO_APPROVE", { connectionId: session.connectionId, toolName });
             return { behavior: "allow" as const, updatedInput: input };
           }
         }
@@ -735,12 +844,12 @@ async function runQuery(
             toolInput: input,
           };
           session.pendingPermission = permission;
-          permissionResolvers.set(requestId, { resolve, input });
+          session.permissionResolvers.set(requestId, { resolve, input });
           callbacks.onPermission(permission);
 
           signal.addEventListener("abort", () => {
-            if (permissionResolvers.has(requestId)) {
-              permissionResolvers.delete(requestId);
+            if (session.permissionResolvers.has(requestId)) {
+              session.permissionResolvers.delete(requestId);
               resolve({ behavior: "deny", message: "Session aborted" });
             }
           });
@@ -748,6 +857,7 @@ async function runQuery(
       },
     },
   });
+  session.stream = stream;
 
   const toolUseNames = new Map<string, string>();
   const toolUseInputs = new Map<string, Record<string, unknown>>();
@@ -865,4 +975,7 @@ async function runQuery(
       }
     }
   }
+  // クエリ終了後は stream 参照を落とす。完了済みセッションは再接続のためMapに残るため、
+  // 死んだ stream を interrupt() してしまわないようにする。
+  session.stream = null;
 }

@@ -1,9 +1,17 @@
 import { Router } from "express";
+import { getConnectionId } from "./connectionId.js";
 import { resolvePermission, resolveQuestion } from "../claude/executor.js";
 
 const router = Router();
 
 router.post("/api/permission", (req, res) => {
+  // マルチセッション対応: X-Connection-Id が無い/不正な場合は400
+  const connectionId = getConnectionId(req, res);
+  if (!connectionId) {
+    res.status(400).json({ error: "X-Connection-Id header is required" });
+    return;
+  }
+
   const { requestId, approved, answers, annotations } = req.body;
 
   if (!requestId) {
@@ -15,6 +23,7 @@ router.post("/api/permission", (req, res) => {
   if (answers !== undefined) {
     const isDeny = typeof answers === "object" && answers !== null && Object.keys(answers).length === 0;
     const resolved = resolveQuestion(
+      connectionId,
       requestId,
       isDeny ? {} : answers as Record<string, string>,
       isDeny ? undefined : annotations as Record<string, { notes?: string }> | undefined,
@@ -33,7 +42,7 @@ router.post("/api/permission", (req, res) => {
     return;
   }
 
-  const resolved = resolvePermission(requestId, approved);
+  const resolved = resolvePermission(connectionId, requestId, approved);
   if (!resolved) {
     res.status(404).json({ error: "No pending permission with this requestId" });
     return;

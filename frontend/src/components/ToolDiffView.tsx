@@ -103,6 +103,8 @@ export default function ToolDiffView({ toolName, filePath, structuredPatch, cont
             </Typography>
           </Box>
         )}
+        {/* diffは折り返すと +/- の桁とインデントが崩れて読めなくなるため、
+            各行は white-space:pre のままこのコンテナ内で横スクロールさせる */}
         <Box
           sx={{
             fontFamily: "'SF Mono', 'Fira Code', 'Consolas', monospace",

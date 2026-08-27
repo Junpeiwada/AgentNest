@@ -14,14 +14,10 @@ interface Props {
   onSessionIdChange?: (sessionId: string | null) => void;
   initialMessages?: Message[];
   initialSessionId?: string | null;
-  resetNonce?: number;
   visible?: boolean;
 }
 
-export default function Chat({ repoId, onSessionIdChange, initialMessages, initialSessionId, resetNonce, visible }: Props) {
-  const conversationKey = initialSessionId != null
-    ? `session:${initialSessionId}`
-    : `new:${resetNonce ?? 0}`;
+export default function Chat({ repoId, onSessionIdChange, initialMessages, initialSessionId, visible }: Props) {
   const {
     messages,
     isLoading,
@@ -42,7 +38,7 @@ export default function Chat({ repoId, onSessionIdChange, initialMessages, initi
     setSelectedEffort,
     permissionMode,
     setPermissionMode,
-  } = useChat(initialMessages, initialSessionId, conversationKey);
+  } = useChat(initialMessages, initialSessionId);
 
   // AI応答待ち中はiPhoneのスリープを防止
   useWakeLock(isLoading);

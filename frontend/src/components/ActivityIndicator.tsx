@@ -11,7 +11,7 @@ interface Props {
 export default function ActivityIndicator({ activity, isLoading, sessionState, toolProgress }: Props) {
   const isWaiting = sessionState === "requires_action";
 
-  let label: string | null = null;
+  let label: string | null;
   if (toolProgress) {
     const base = activity ?? `Using ${toolProgress.toolName}...`;
     label = `${base} (${toolProgress.elapsedSeconds}s)`;
@@ -48,6 +48,7 @@ export default function ActivityIndicator({ activity, isLoading, sessionState, t
             display: "flex",
             gap: "3px",
             alignItems: "center",
+            flexShrink: 0,
           }}
         >
           {[0, 1, 2].map((i) => (
@@ -71,6 +72,10 @@ export default function ActivityIndicator({ activity, isLoading, sessionState, t
           color: isWaiting ? "warning.main" : "text.secondary",
           fontStyle: "italic",
           letterSpacing: "-0.01em",
+          /* Grepのパターン等、空白を含まない長いラベルで横に伸びるのを防ぐ */
+          minWidth: 0,
+          wordBreak: "break-word",
+          overflowWrap: "anywhere",
         }}
       >
         {label}

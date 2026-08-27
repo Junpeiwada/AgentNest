@@ -119,6 +119,7 @@ AgentNest/
 │   │   ├── executor.ts        # 中核。SDK query()ラッパー、SSE送信、セッション管理、権限フロー
 │   │   └── commandExpander.ts # .claude/commands/ スラッシュコマンド展開
 │   └── routes/       # chat, repos, sessions, files, permission, reconnect, status, git, models
+│                      #   connectionId.ts はX-Connection-Idヘッダ取り出しの共通ヘルパー
 ├── frontend/         # React SPA
 │   └── src/
 │       ├── hooks/useChat.ts   # SSEストリーム処理・再接続。フロントエンドの中核
@@ -164,7 +165,7 @@ AgentNest/
 
 | レイヤー | 技術 |
 |---------|------|
-| フロントエンド | React 19, Vite 8, MUI 7, react-markdown |
+| フロントエンド | React 19, Vite 8, MUI 9, react-markdown |
 | バックエンド | Express 5, tsx (実行), TypeScript |
 | デスクトップ | Tauri 2 (Rust) |
 | AI | @anthropic-ai/claude-agent-sdk |
@@ -173,7 +174,7 @@ AgentNest/
 
 ### 設計上の注意点
 
-- セッション状態はサーバーのインメモリ変数 `currentSession` で管理（シングルユーザー前提）
+- セッション状態はサーバーのインメモリ `Map<connectionId, Session>` で管理。クライアントがタブ単位で発行した UUID をヘッダ `X-Connection-Id` で受け取り、複数端末・複数タブのセッションを分離する（永続化はしないためサーバー再起動で実行中状態は失われる）
 - 開発時はViteプロキシ（`/api` → `localhost:3000`）でCORS回避
 - プロダクションではExpressがフロントエンドの静的ファイルも配信
 - リポジトリのベースパスは環境変数 `BASE_PROJECT_DIR`（`.env`で設定、`.env.example`参照）
