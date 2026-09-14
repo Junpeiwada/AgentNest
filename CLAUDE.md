@@ -118,8 +118,8 @@ AgentNest/
 │   ├── claude/
 │   │   ├── executor.ts        # 中核。SDK query()ラッパー、SSE送信、セッション管理、権限フロー
 │   │   └── commandExpander.ts # .claude/commands/ スラッシュコマンド展開
-│   └── routes/       # chat, repos, sessions, files, permission, reconnect, status, git, models
-│                      #   connectionId.ts はX-Connection-Idヘッダ取り出しの共通ヘルパー
+│   └── routes/       # chat, repos, sessions, files, permission, reconnect, status, agents, git, models
+│                      #   connectionId.ts はX-Client-Id/X-Agent-Idヘッダ取り出しの共通ヘルパー
 ├── frontend/         # React SPA
 │   └── src/
 │       ├── hooks/useChat.ts   # SSEストリーム処理・再接続。フロントエンドの中核
@@ -150,7 +150,7 @@ AgentNest/
 
 1. ユーザーがメッセージ送信 → POST `/api/chat` （SSEレスポンス）
 2. サーバーが `executor.ts` でClaude Code SDK `query()` を実行
-3. SSEイベントタイプ: `text`, `activity`, `tool_result`, `permission`, `done`, `error`, `session_id`, `limit_error`
+3. SSEイベントタイプ: `agent_id`, `text`, `activity`, `tool_result`, `permission`, `done`, `error`, `session_id`, `limit_error`
 4. ツール実行時に権限要求 → `permission` イベント → フロントエンドでダイアログ表示 → POST `/api/permission` で承認/拒否
 5. 切断時は `/api/reconnect` で状態スナップショットを取得し再接続（最大3回リトライ）
 
@@ -174,7 +174,7 @@ AgentNest/
 
 ### 設計上の注意点
 
-- セッション状態はサーバーのインメモリ `Map<connectionId, Session>` で管理。クライアントがタブ単位で発行した UUID をヘッダ `X-Connection-Id` で受け取り、複数端末・複数タブのセッションを分離する（永続化はしないためサーバー再起動で実行中状態は失われる）
+- セッション状態はサーバーのインメモリ `Map<agentId, Session>` で管理。`agentId` はClaude Codeの実行1本ごとにサーバーが発行するUUIDで、所有者はブラウザ単位でクライアントが発行し `localStorage` に保持する `clientId` が表す。チャット系APIはヘッダ `X-Client-Id`（所有者、必須）と `X-Agent-Id`（対象Agentの名指し、エンドポイントにより必須）で分離する（永続化はしないためサーバー再起動で実行中状態は失われる）。1つの `clientId` から複数の `agentId` を同時に持てるため、1タブから複数リポジトリのAgentを並行実行でき、送信しても他の実行中Agentは自動で中断されない（後勝ちabortは廃止）
 - 開発時はViteプロキシ（`/api` → `localhost:3000`）でCORS回避
 - プロダクションではExpressがフロントエンドの静的ファイルも配信
 - リポジトリのベースパスは環境変数 `BASE_PROJECT_DIR`（`.env`で設定、`.env.example`参照）

@@ -157,12 +157,23 @@ test.describe("Reconnection", () => {
   }) => {
     await mockRepos(page);
 
-    // First /api/chat call: abort to simulate connection failure
-    let chatCallCount = 0;
+    // agentId/clientId分離対応: 新API契約では /api/reconnect が X-Agent-Id で対象Agentを
+    // 名指しするため、フロントは agent_id イベントで受け取ったagentIdが無いと再接続を
+    // 試みられない（useChat.ts attemptReconnect）。そのため接続断のシミュレーションは
+    // 「agent_id受信後、done/errorなしでストリームが終わる（silent disconnect）」の形にする。
+    // route.abort（ヘッダー到達前の完全な接続失敗）はagent_idも届かず新設計では復旧不能な
+    // ケースになるため、切断シミュレーションとしてはこちらが実態に近い。
     await page.route("/api/chat", (route) => {
-      chatCallCount++;
-      // Simulate a network failure
-      return route.abort("connectionreset");
+      const body = sseBody([
+        { type: "agent_id", agentId: SESSION_ID },
+        { type: "text", content: "Connecting..." },
+        // done/error なし → 接続が切れた
+      ]);
+      return route.fulfill({
+        status: 200,
+        headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" },
+        body,
+      });
     });
 
     // /api/reconnect: return state snapshot + done
@@ -204,8 +215,16 @@ test.describe("Reconnection", () => {
   }) => {
     await mockRepos(page);
 
-    // /api/chat: abort
-    await page.route("/api/chat", (route) => route.abort("connectionreset"));
+    // agent_id を受け取った直後にストリームが切れる（silent disconnect）。
+    // その後の /api/reconnect リトライが全て失敗するケース。
+    await page.route("/api/chat", (route) => {
+      const body = sseBody([{ type: "agent_id", agentId: SESSION_ID }]);
+      return route.fulfill({
+        status: 200,
+        headers: { "Content-Type": "text/event-stream" },
+        body,
+      });
+    });
 
     // /api/reconnect: also fail (404 = no active session)
     await page.route("/api/reconnect", (route) =>
@@ -231,12 +250,18 @@ test.describe("Reconnection", () => {
     await page.route("/api/chat", (route) => {
       chatCalls++;
       if (chatCalls === 1) {
-        // First call: return partial data then abort
-        // We send some initial text, but the connection "breaks" after
-        // Note: route.fulfill delivers the whole body at once,
-        // so the frontend will process these events before the stream ends normally.
-        // To simulate a mid-stream break, we abort instead.
-        return route.abort("connectionreset");
+        // First call: agent_id を通知した後、silent disconnect（done/errorなし）で終わる。
+        // route.fulfill は一括応答のため、フロントは agent_id → text の順に処理してから
+        // ストリーム終了を検知し、再接続を試みる。
+        const body = sseBody([
+          { type: "agent_id", agentId: SESSION_ID },
+          { type: "text", content: "partial" },
+        ]);
+        return route.fulfill({
+          status: 200,
+          headers: { "Content-Type": "text/event-stream" },
+          body,
+        });
       }
       // Should not be called again (reconnect goes to /api/reconnect)
       return route.abort();
@@ -282,6 +307,7 @@ test.describe("Reconnection", () => {
     // /api/chat: ストリームがdoneイベントなしで終了（接続が静かに切断されたケース）
     await page.route("/api/chat", (route) => {
       const body = sseBody([
+        { type: "agent_id", agentId: SESSION_ID },
         { type: "session_id", sessionId: SESSION_ID },
         { type: "text", content: "Partial response..." },
         // done イベントなし — 接続が切れた
@@ -337,6 +363,7 @@ test.describe("Reconnection", () => {
     // /api/chat: errorイベントで終了（doneなし）
     await page.route("/api/chat", (route) => {
       const body = sseBody([
+        { type: "agent_id", agentId: SESSION_ID },
         { type: "session_id", sessionId: SESSION_ID },
         { type: "text", content: "Working..." },
         { type: "error", error: "Something went wrong" },
@@ -380,6 +407,7 @@ test.describe("Reconnection", () => {
         status: 200,
         headers: { "Content-Type": "text/event-stream" },
         body: sseBody([
+          { type: "agent_id", agentId: SESSION_ID },
           { type: "session_id", sessionId: SESSION_ID },
           {
             type: "permission",
@@ -430,7 +458,15 @@ test.describe("Reconnection", () => {
   }) => {
     await mockRepos(page);
 
-    await page.route("/api/chat", (route) => route.abort("connectionreset"));
+    // agent_id 受信後に silent disconnect（done/errorなし終了）→ 自動再接続がトリガーされる
+    await page.route("/api/chat", (route) => {
+      const body = sseBody([{ type: "agent_id", agentId: SESSION_ID }]);
+      return route.fulfill({
+        status: 200,
+        headers: { "Content-Type": "text/event-stream" },
+        body,
+      });
+    });
 
     let reconnectCalls = 0;
     await page.route("/api/reconnect", (route) => {

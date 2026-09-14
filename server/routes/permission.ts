@@ -1,14 +1,21 @@
 import { Router } from "express";
-import { getConnectionId } from "./connectionId.js";
-import { resolvePermission, resolveQuestion } from "../claude/executor.js";
+import { getClientId, getAgentId } from "./connectionId.js";
+import { resolveOwnedPermission, resolveOwnedQuestion } from "../claude/executor.js";
 
 const router = Router();
 
 router.post("/api/permission", (req, res) => {
-  // マルチセッション対応: X-Connection-Id が無い/不正な場合は400
-  const connectionId = getConnectionId(req, res);
-  if (!connectionId) {
-    res.status(400).json({ error: "X-Connection-Id header is required" });
+  // agentId/clientId分離対応: X-Client-Id が無い/不正な場合は400
+  const clientId = getClientId(req, res);
+  if (!clientId) {
+    res.status(400).json({ error: "X-Client-Id header is required" });
+    return;
+  }
+
+  // X-Agent-Id は必須（どのAgentへの応答かを名指しする）。欠落・不正は400。
+  const agentId = getAgentId(req);
+  if (!agentId) {
+    res.status(400).json({ error: "X-Agent-Id header is required" });
     return;
   }
 
@@ -19,11 +26,15 @@ router.post("/api/permission", (req, res) => {
     return;
   }
 
+  // 所有者チェックは Owned 系ラッパー（resolveOwnedPermission / resolveOwnedQuestion）に集約する。
+  // 他 clientId の agentId・requestId は404で弾く（存在を秘匿する）。
+
   // AskUserQuestion の回答（answers が undefined でない = question への応答）
   if (answers !== undefined) {
     const isDeny = typeof answers === "object" && answers !== null && Object.keys(answers).length === 0;
-    const resolved = resolveQuestion(
-      connectionId,
+    const resolved = resolveOwnedQuestion(
+      clientId,
+      agentId,
       requestId,
       isDeny ? {} : answers as Record<string, string>,
       isDeny ? undefined : annotations as Record<string, { notes?: string }> | undefined,
@@ -42,7 +53,7 @@ router.post("/api/permission", (req, res) => {
     return;
   }
 
-  const resolved = resolvePermission(connectionId, requestId, approved);
+  const resolved = resolveOwnedPermission(clientId, agentId, requestId, approved);
   if (!resolved) {
     res.status(404).json({ error: "No pending permission with this requestId" });
     return;

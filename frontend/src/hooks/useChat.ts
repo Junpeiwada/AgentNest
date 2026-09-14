@@ -14,7 +14,7 @@ import {
   normalizePermissionMode,
   type PermissionMode,
 } from "../lib/permissionMode";
-import { useConnectionId } from "./useConnectionId";
+import { useClientId } from "./useClientId";
 
 export interface StructuredPatchHunk {
   oldStart: number;
@@ -157,6 +157,8 @@ function setAssistantError(message: Message, error: AssistantError): Message {
 export function useChat(
   initialMessages?: Message[],
   initialSessionId?: string | null,
+  repoId?: string,
+  initialAgentId?: string | null,
 ) {
   const [messages, setMessages] = useState<Message[]>(initialMessages ?? []);
   const [isLoading, setIsLoading] = useState(false);
@@ -170,10 +172,24 @@ export function useChat(
   const [sessionState, setSessionState] = useState<SessionState | null>(null);
   const [toolProgress, setToolProgress] = useState<ToolProgress | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  // マウント時自動復帰（GET /api/agents の往復を待つ）専用のAbortController。
+  // sendMessage用のabortRefとは意図的に分離する。共用すると、自動復帰のfetch待ち中に
+  // ユーザーがメッセージを送信した場合に、sendMessageが立てたcontrollerを自動復帰effectが
+  // 後から上書きしてしまい、sendMessageのfinallyクリーンアップ（isLoading解除等）が
+  // スキップされる race condition が起きる（レビュー指摘#1）。
+  const autoReconnectAbortRef = useRef<AbortController | null>(null);
   const sessionIdRef = useRef<string | null>(initialSessionId ?? null);
   const forceFreshSessionRef = useRef(initialSessionId == null);
-  // タブ単位のconnectionId。サーバー側のセッション分離のため全チャット系APIに付与する。
-  const connectionId = useConnectionId();
+  // ブラウザ単位のclientId。サーバー側の所有者判定のため全チャット系APIに付与する。
+  const clientId = useClientId();
+  // 現在継続中のAgentId。SSEの `agent_id` イベントで受け取り、以降のリクエストに
+  // X-Agent-Id として付与する。stateは表示・依存用、refはコールバック内での最新値参照用。
+  const [agentId, setAgentId] = useState<string | null>(null);
+  const agentIdRef = useRef<string | null>(null);
+  const setAgentIdBoth = useCallback((next: string | null) => {
+    agentIdRef.current = next;
+    setAgentId(next);
+  }, []);
 
   // --- モデル / Thinking effort 選択（Docs/仕様-モデル選択.md）---
   const [models, setModels] = useState<ModelInfo[]>([]);
@@ -281,6 +297,8 @@ export function useChat(
   useEffect(() => () => {
     abortRef.current?.abort();
     abortRef.current = null;
+    autoReconnectAbortRef.current?.abort();
+    autoReconnectAbortRef.current = null;
   }, []);
 
   /** Parse SSE lines from a ReadableStream, calling handler for each event.
@@ -321,7 +339,9 @@ export function useChat(
   /** Handle a single SSE event (shared between initial connection and reconnect) */
   const handleSSEEvent = useCallback(
     (data: SSEEvent) => {
-      if (data.type === "session_id") {
+      if (data.type === "agent_id") {
+        setAgentIdBoth(data.agentId);
+      } else if (data.type === "session_id") {
         setSessionId(data.sessionId);
       } else if (data.type === "activity") {
         setActivity(data.activity);
@@ -379,16 +399,24 @@ export function useChat(
         );
       }
     },
-    []
+    [setAgentIdBoth]
   );
 
-  /** Attempt to reconnect to an active session via /api/reconnect */
+  /**
+   * Attempt to reconnect to an active session via /api/reconnect
+   *
+   * targetAgentId省略時は現在保持中のagentId（agentIdRef.current）に対して再接続する
+   * （送信中の接続断からの復帰）。明示的に指定した場合は、そのAgentへの復帰専用に使う
+   * （リロード直後の自動復帰・Agent一覧からの選択復帰）。
+   */
   const attemptReconnect = useCallback(
-    async (signal: AbortSignal): Promise<boolean> => {
+    async (signal: AbortSignal, targetAgentId?: string, expectedRepoId?: string): Promise<boolean> => {
+      const agentIdToUse = targetAgentId ?? agentIdRef.current;
+      if (!agentIdToUse) return false;
       try {
         const res = await fetch("/api/reconnect", {
           signal,
-          headers: { "X-Connection-Id": connectionId },
+          headers: { "X-Client-Id": clientId, "X-Agent-Id": agentIdToUse },
         });
         if (!res.ok) return false;
 
@@ -397,27 +425,86 @@ export function useChat(
 
         let receivedTerminalEvent = false;
         let sessionCompleted = false;
+        // repoId不一致で復帰を中止したかどうか。中止後に届く後続イベントは無視する。
+        let repoMismatch = false;
 
         await processSSEStream(reader, signal, (data) => {
+          if (repoMismatch) return;
           if (data.type === "reconnect_state") {
+            // P4-5: 復帰先リポジトリの照合。expectedRepoId が指定されているのに一致しない場合は
+            // 「他Agentと混線させない」ため静かに諦める（画面には一切反映しない）。
+            // ブラウザの戻る/進むで resumeAgentId が残ったまま別リポジトリのURLに遷移した場合等に
+            // 「リポジトリBの画面にリポジトリAのAgentの出力が復帰する」事故を防ぐ。
+            if (expectedRepoId && data.repoId && data.repoId !== expectedRepoId) {
+              repoMismatch = true;
+              return;
+            }
             // Restore accumulated state from the server snapshot
+            setAgentIdBoth(agentIdToUse);
             if (data.sessionId) setSessionId(data.sessionId);
             setPendingPermission(data.pendingPermission ?? null);
             setPendingQuestion(data.pendingQuestion ?? null);
+            setIsLoading(!data.completed);
             if (data.assistantMessage) {
-              setMessages((prev) =>
-                updateLastAssistant(prev, () => normalizeAssistantMessage(data.assistantMessage))
-              );
+              setMessages((prev) => {
+                // 自動復帰（画面がまっさら＝messagesが空）の場合は末尾に継ぎ足す先の
+                // assistantメッセージが無いため、スナップショットをそのまま追加する。
+                // P4-2根本対応: lastUserMessageが取得できた場合は、それを通常のuserメッセージ
+                // として先に積んでからassistantメッセージを積む。これにより「何を尋ねたのか」が
+                // 画面から消える問題が解消するため、「実行中だった会話を再開しました」の注記は
+                // 不要になる（取得できなかった場合のみのフォールバックに格下げする）。
+                // 手動再接続（送信中の切断復帰）ではsendMessageが既に空のassistant
+                // メッセージを積んでいるので、従来どおりその末尾を更新する（元のユーザー
+                // メッセージも画面に既に見えているため、ここでは何も積み直さない）。
+                if (prev.length === 0) {
+                  const restored = normalizeAssistantMessage(data.assistantMessage);
+                  const lastUserMessage: string | null =
+                    typeof data.lastUserMessage === "string" && data.lastUserMessage
+                      ? data.lastUserMessage
+                      : null;
+                  const next: Message[] = [];
+                  if (lastUserMessage) {
+                    next.push({ role: "user", content: lastUserMessage });
+                    next.push(restored);
+                  } else {
+                    // フォールバック: ユーザー発言が取得できなかった場合のみ注記を付ける
+                    next.push({
+                      ...restored,
+                      parts: [
+                        { type: "text", content: "（実行中だった会話を再開しました）\n\n" },
+                        ...(restored.parts ?? []),
+                      ],
+                    });
+                  }
+                  return next;
+                }
+                return updateLastAssistant(prev, () => normalizeAssistantMessage(data.assistantMessage));
+              });
             } else if (typeof data.responseText === "string") {
-              setMessages((prev) =>
-                updateLastAssistant(prev, (last) => ({
+              setMessages((prev) => {
+                if (prev.length === 0) {
+                  const lastUserMessage: string | null =
+                    typeof data.lastUserMessage === "string" && data.lastUserMessage
+                      ? data.lastUserMessage
+                      : null;
+                  const next: Message[] = [];
+                  if (lastUserMessage) next.push({ role: "user", content: lastUserMessage });
+                  if (data.responseText) {
+                    const note = lastUserMessage ? "" : "（実行中だった会話を再開しました）\n\n";
+                    next.push(normalizeAssistantMessage({ role: "assistant", content: note + data.responseText }));
+                  } else if (next.length === 0) {
+                    return [];
+                  }
+                  return next;
+                }
+                return updateLastAssistant(prev, (last) => ({
                   ...normalizeAssistantMessage(last),
                   content: data.responseText,
                   parts: data.responseText
                     ? [{ type: "text", content: data.responseText }]
                     : [],
-                }))
-              );
+                }));
+              });
             }
             if (data.completed) {
               sessionCompleted = true;
@@ -431,13 +518,96 @@ export function useChat(
           }
         });
 
+        if (repoMismatch) return false;
         return sessionCompleted || receivedTerminalEvent;
       } catch {
         return false;
       }
     },
-    [processSSEStream, handleSSEEvent, connectionId]
+    [processSSEStream, handleSSEEvent, clientId, setAgentIdBoth]
   );
+
+  // P4-5/P4-6: マウント時、実行中Agentへ自動でreconnectし復帰する。
+  // リロード後・タブを開き直した後に「続きが画面に出る」ための入口であり、
+  // Header のAgent一覧から特定のAgentを選んで復帰する際の入口でもある。
+  //
+  // 復帰先の決め方は2通り:
+  // 1. initialAgentId が明示指定されている場合（Header のAgent一覧から選択され、
+  //    そのagentId付きでChatが再マウントされたケース）は、そのAgentへ直接復帰する。
+  // 2. 指定が無い場合は、現在のリポジトリに実行中Agentがあるかを自動で探しに行く
+  //    （リロード直後・新規チャット画面を開いた直後のケース）。
+  //
+  // どちらの場合も initialSessionId が指定されているとき（履歴一覧から過去セッションを
+  // 開いた場合）は自動復帰の対象外にする。過去セッションを見に来ただけで、そのセッションを
+  // 今も実行しているAgentがあるとは限らないため、無関係なAgentに誤って復帰するのを避ける。
+  //
+  // repoIdが無い（リポジトリ未選択）場合も何もしない。GET /api/agents が404を返すことはなく
+  // 空配列で返るため、「実行中Agentが無い」は例外ではなく正常系として静かに扱う。
+  useEffect(() => {
+    if (initialSessionId || (!repoId && !initialAgentId)) return;
+    let cancelled = false;
+    // effart本体の先頭でcontrollerを宣言し、クリーンアップから確実にabort()できるようにする
+    // （レビュー指摘#3: React 19 StrictMode のマウント→アンマウント→再マウントで
+    // 1回目のSSE接続が生き残ったまま2回目が別接続を張るのを防ぐ。
+    // 従来は cancelled=true を設定するだけで abort() を呼んでいなかった）。
+    const controller = new AbortController();
+
+    (async () => {
+      try {
+        let targetAgentId: string | null = initialAgentId ?? null;
+
+        if (!targetAgentId) {
+          const res = await fetch("/api/agents", {
+            signal: controller.signal,
+            headers: { "X-Client-Id": clientId },
+          });
+          if (!res.ok || cancelled) return;
+          const data = await res.json();
+          const agents: Array<{ agentId: string; repoId: string; completed: boolean; createdAt: number }> =
+            Array.isArray(data.agents) ? data.agents : [];
+          // 同じリポジトリの実行中(completed=false)Agentのうち、最も新しい(createdAt降順)ものを選ぶ。
+          // listAgentsは既に「実行中優先→createdAt降順」でソート済みだが、repoIdで絞った後も
+          // 順序が保たれることに依存せず、ここでも明示的に選び直す。
+          const candidates = agents.filter((a) => a.repoId === repoId && !a.completed);
+          if (candidates.length === 0 || cancelled) return;
+          targetAgentId = candidates.reduce((best, cur) => (cur.createdAt > best.createdAt ? cur : best)).agentId;
+        }
+        if (!targetAgentId || cancelled) return;
+
+        // レビュー指摘#1: このeffectはGET /api/agentsのfetch往復を待つ（上のブロック）ため、
+        // その間にユーザーが送信を開始する余地がある。ユーザーの明示的な送信を常に優先するため、
+        // abortRef（sendMessage用）が既にセットされている＝送信が先に始まっている場合は、
+        // 自動復帰はここで諦める（sendMessage側は止めない）。
+        // abortRefをautoReconnectAbortRefと分離したことで、この後に自動復帰を続行しても
+        // sendMessageのcontrollerを上書きすることはないが、それでも「無関係な自動復帰の
+        // SSEが画面に混入する」こと自体は避けたいため、開始前にここで判定する。
+        if (abortRef.current || cancelled) return;
+        autoReconnectAbortRef.current = controller;
+        setIsReconnecting(true);
+        setActivity("実行中のAgentに接続しています...");
+        // レビュー指摘#5: repoId（現在表示中のリポジトリ）をexpectedRepoIdとして渡す。
+        // ブラウザの戻る/進むでinitialAgentId（resumeAgentId）が残ったまま別リポジトリの
+        // URLに遷移した場合等、サーバから返るrepoIdと食い違えば静かに復帰を中止する。
+        const reconnected = await attemptReconnect(controller.signal, targetAgentId, repoId);
+        if (cancelled) return;
+        setIsReconnecting(false);
+        setActivity(null);
+        if (autoReconnectAbortRef.current === controller) autoReconnectAbortRef.current = null;
+        // 404等で復帰できなかった場合は静かに諦める（新規チャット画面のまま）。
+        // エラー表示はしない（ユーザーは何も操作していないため、失敗をエラーとして見せる必要はない）。
+        void reconnected;
+      } catch {
+        // ネットワークエラー等も同様に静かに諦める
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      controller.abort();
+      if (autoReconnectAbortRef.current === controller) autoReconnectAbortRef.current = null;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- マウント時に一度だけ試みる（各値はマウント中不変）
+  }, []);
 
   /** Reconnect with retries */
   const reconnectWithRetries = useCallback(
@@ -463,6 +633,17 @@ export function useChat(
       images?: ImageAttachment[],
       sessionIdOverride?: string | null,
     ) => {
+      // レビュー指摘#1: 自動復帰effect（マウント時、GET /api/agentsのfetch往復を待つ）が
+      // 進行中の間にユーザーが送信した場合、ユーザーの明示的な送信を常に優先する。
+      // 自動復帰を真っ先にabortしてから自分のcontrollerをセットすることで、
+      // 「自動復帰が後からabortRef.currentを上書きし、このsendMessageのfinallyクリーンアップ
+      // （isLoading解除等）がスキップされる」「自動復帰のSSEが無関係な出力として画面に混入する」
+      // という race condition を防ぐ。
+      if (autoReconnectAbortRef.current) {
+        autoReconnectAbortRef.current.abort();
+        autoReconnectAbortRef.current = null;
+      }
+
       // Abort any existing connection (follow-up during loading)
       if (abortRef.current) {
         abortRef.current.abort();
@@ -490,6 +671,15 @@ export function useChat(
         : forceFreshSessionRef.current
           ? null
           : sessionIdRef.current;
+      // P4-7: 「現在のAgentを継続」か「新規Agentを起こす」かの判断。
+      // agentIdRef.current（無ければ null=新規）をそのまま継続対象として送る。
+      // - resetSession後（新規会話）: resetSession内で既に agentIdRef を null化済み。
+      // - 履歴一覧から別セッションを開いた直後（initialSessionIdあり）: P4-5の自動復帰effectは
+      //   initialSessionId指定時にスキップされる設計のため、agentIdRefはこのマウントの間
+      //   一度もセットされず null のまま。よってここで特別扱いしなくても自然に新規Agentになる。
+      // なお sendMessage の sessionIdOverride 引数は現状どの呼び出し元からも渡されておらず
+      // （Chat.tsxは常にundefinedで呼ぶ）、continueAgentIdの判断材料には使わない。
+      const continueAgentId = agentIdRef.current;
       forceFreshSessionRef.current = false;
 
       // モデル/effort: default も含めて常に明示送信（案2）
@@ -553,8 +743,8 @@ export function useChat(
       try {
         const res = await fetch("/api/chat", {
           method: "POST",
-          headers: { "Content-Type": "application/json", "X-Connection-Id": connectionId },
-          body: JSON.stringify({ message, repoId, sessionId: requestSessionId, permissionMode: apiPermissionMode, images: apiImages, model: apiModel, effort: apiEffort }),
+          headers: { "Content-Type": "application/json", "X-Client-Id": clientId },
+          body: JSON.stringify({ message, repoId, sessionId: requestSessionId, agentId: continueAgentId, permissionMode: apiPermissionMode, images: apiImages, model: apiModel, effort: apiEffort }),
           signal: controller.signal,
         });
 
@@ -620,19 +810,21 @@ export function useChat(
         }
       }
     },
-    [processSSEStream, handleSSEEvent, reconnectWithRetries, connectionId]
+    [processSSEStream, handleSSEEvent, reconnectWithRetries, clientId]
   );
 
   const respondPermission = useCallback(
     async (requestId: string, approved: boolean) => {
       setPendingPermission(null);
+      const agentIdToUse = agentIdRef.current;
+      if (!agentIdToUse) return; // 継続対象のAgentが無ければ送りようがない（通常発生しない）
       await fetch("/api/permission", {
         method: "POST",
-        headers: { "Content-Type": "application/json", "X-Connection-Id": connectionId },
+        headers: { "Content-Type": "application/json", "X-Client-Id": clientId, "X-Agent-Id": agentIdToUse },
         body: JSON.stringify({ requestId, approved }),
       });
     },
-    [connectionId]
+    [clientId]
   );
 
   const respondQuestion = useCallback(
@@ -642,41 +834,51 @@ export function useChat(
       annotations?: Record<string, { notes?: string }>
     ) => {
       setPendingQuestion(null);
+      const agentIdToUse = agentIdRef.current;
+      if (!agentIdToUse) return; // 継続対象のAgentが無ければ送りようがない（通常発生しない）
       await fetch("/api/permission", {
         method: "POST",
-        headers: { "Content-Type": "application/json", "X-Connection-Id": connectionId },
+        headers: { "Content-Type": "application/json", "X-Client-Id": clientId, "X-Agent-Id": agentIdToUse },
         body: JSON.stringify({ requestId, answers: answers ?? {}, annotations }),
       });
     },
-    [connectionId]
+    [clientId]
   );
 
   /** 現在の生成を停止する（UIの脱出口） */
   const stopGeneration = useCallback(async () => {
+    if (autoReconnectAbortRef.current) {
+      autoReconnectAbortRef.current.abort();
+      autoReconnectAbortRef.current = null;
+    }
     if (abortRef.current) {
       abortRef.current.abort();
       abortRef.current = null;
     }
-    // サーバー側のClaude Codeプロセスもinterrupt
-    try {
-      await fetch("/api/interrupt", {
-        method: "POST",
-        headers: { "X-Connection-Id": connectionId },
-      });
-    } catch { /* サーバー到達不能でも無視 */ }
+    // サーバー側のClaude Codeプロセスもinterrupt（対象Agentが無ければ送りようがない）
+    const agentIdToUse = agentIdRef.current;
+    if (agentIdToUse) {
+      try {
+        await fetch("/api/interrupt", {
+          method: "POST",
+          headers: { "X-Client-Id": clientId, "X-Agent-Id": agentIdToUse },
+        });
+      } catch { /* サーバー到達不能でも無視 */ }
+    }
     setIsLoading(false);
     setActivity(null);
     setSessionState(null);
     setToolProgress(null);
     setPendingPermission(null);
     setPendingQuestion(null);
-  }, [connectionId]);
+  }, [clientId]);
 
   const resetSession = useCallback(() => {
     setMessages([]);
     setSessionId(null);
     sessionIdRef.current = null;
     forceFreshSessionRef.current = true;
+    setAgentIdBoth(null); // 新規会話に切り替えるため、継続対象のAgentも手放す
     setIsLoading(false);
     setActivity(null);
     setSessionState(null);
@@ -684,11 +886,15 @@ export function useChat(
     setPendingPermission(null);
     setPendingQuestion(null);
     setIsReconnecting(false);
+    if (autoReconnectAbortRef.current) {
+      autoReconnectAbortRef.current.abort();
+      autoReconnectAbortRef.current = null;
+    }
     if (abortRef.current) {
       abortRef.current.abort();
       abortRef.current = null;
     }
-  }, []);
+  }, [setAgentIdBoth]);
 
   return {
     messages,
@@ -697,6 +903,7 @@ export function useChat(
     sessionState,
     toolProgress,
     sessionId,
+    agentId,
     pendingPermission,
     pendingQuestion,
     isReconnecting,

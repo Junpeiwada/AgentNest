@@ -62,8 +62,18 @@ test.describe("Bug: isLoading not cleared after reconnection", () => {
   }) => {
     await mockRepos(page);
 
-    // /api/chat: abort → triggers reconnection path
-    await page.route("/api/chat", (route) => route.abort("connectionreset"));
+    // agentId/clientId分離対応: /api/reconnect は X-Agent-Id で対象Agentを名指しするため、
+    // フロントは agent_id イベントで受け取ったagentIdが無いと再接続を試みられない
+    // （useChat.ts attemptReconnect）。そのため接続断は「agent_id受信後、done/errorなしで
+    // ストリームが終わる（silent disconnect）」で再現する。
+    await page.route("/api/chat", (route) => {
+      const body = sseBody([{ type: "agent_id", agentId: SESSION_ID }]);
+      return route.fulfill({
+        status: 200,
+        headers: { "Content-Type": "text/event-stream" },
+        body,
+      });
+    });
 
     // /api/reconnect: return completed state
     await page.route("/api/reconnect", (route) => {
@@ -111,7 +121,15 @@ test.describe("Bug: isLoading not cleared after reconnection", () => {
   }) => {
     await mockRepos(page);
 
-    await page.route("/api/chat", (route) => route.abort("connectionreset"));
+    // agent_id 受信後に silent disconnect。以降の /api/reconnect が全て失敗するケース。
+    await page.route("/api/chat", (route) => {
+      const body = sseBody([{ type: "agent_id", agentId: SESSION_ID }]);
+      return route.fulfill({
+        status: 200,
+        headers: { "Content-Type": "text/event-stream" },
+        body,
+      });
+    });
     await page.route("/api/reconnect", (route) =>
       route.fulfill({ status: 404, json: { error: "No active session" } })
     );
@@ -139,13 +157,19 @@ test.describe("Bug: isLoading not cleared after reconnection", () => {
     await page.route("/api/chat", (route) => {
       chatCallCount++;
       if (chatCallCount === 1) {
-        return route.abort("connectionreset");
+        // agent_id 受信後に silent disconnect（done/errorなし）→ 再接続がトリガーされる
+        return route.fulfill({
+          status: 200,
+          headers: { "Content-Type": "text/event-stream" },
+          body: sseBody([{ type: "agent_id", agentId: SESSION_ID }]),
+        });
       }
       // 2回目以降: 正常レスポンス
       return route.fulfill({
         status: 200,
         headers: { "Content-Type": "text/event-stream" },
         body: sseBody([
+          { type: "agent_id", agentId: SESSION_ID },
           { type: "session_id", sessionId: SESSION_ID },
           { type: "text", content: "Second message response!" },
           { type: "done", sessionId: SESSION_ID },
@@ -207,6 +231,7 @@ test.describe("Bug: isLoading not cleared after reconnection", () => {
         status: 200,
         headers: { "Content-Type": "text/event-stream" },
         body: sseBody([
+          { type: "agent_id", agentId: SESSION_ID },
           { type: "session_id", sessionId: SESSION_ID },
           { type: "text", content: "Partial..." },
           // done/error なし → 再接続トリガー

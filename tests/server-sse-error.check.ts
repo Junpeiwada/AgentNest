@@ -25,8 +25,10 @@ const mockExpand: ExpandSlashCommandFn = async (message) => ({
 
 /** executeChat が想定外例外を投げるモック */
 const throwingExecuteChat: ExecuteChatFn = async (
-  _connectionId, _message, _repoId, _repoPath, _sessionId, _permissionMode, callbacks,
+  _clientId, _continueAgentId, _message, _repoId, _repoPath, _resumeSessionId, _permissionMode, callbacks,
 ) => {
+  // onAgentId は executor.ts 実装同様、他のどのコールバックよりも先に一度だけ呼ばれる想定
+  callbacks.onAgentId("test-agent-id");
   // onText で少しだけデータを送った後に例外
   callbacks.onText("Hello");
   throw new Error("Simulated unhandled crash in executeChat");
@@ -34,8 +36,9 @@ const throwingExecuteChat: ExecuteChatFn = async (
 
 /** executeChat が正常に完了するモック */
 const normalExecuteChat: ExecuteChatFn = async (
-  _connectionId, _message, _repoId, _repoPath, _sessionId, _permissionMode, callbacks,
+  _clientId, _continueAgentId, _message, _repoId, _repoPath, _resumeSessionId, _permissionMode, callbacks,
 ) => {
+  callbacks.onAgentId("test-agent-id");
   callbacks.onSessionId("test-session");
   callbacks.onText("Hello");
   callbacks.onDone("test-session");
@@ -70,7 +73,7 @@ async function requestChat(server: Server, timeoutMs = 2000): Promise<SSEResult>
 
   const res = await fetch(`http://localhost:${addr.port}/api/chat`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", "X-Connection-Id": "11111111-1111-1111-1111-111111111111" },
+    headers: { "Content-Type": "application/json", "X-Client-Id": "11111111-1111-1111-1111-111111111111" },
     body: JSON.stringify({ message: "test", repoId: "test" }),
     signal: controller.signal,
   });

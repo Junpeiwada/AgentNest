@@ -1,23 +1,31 @@
 import { Router } from "express";
-import { getConnectionId } from "./connectionId.js";
-import { subscribeToSession, getSession, log as serverLog } from "../claude/executor.js";
+import { getClientId, getAgentId } from "./connectionId.js";
+import { subscribeOwnedSession, log as serverLog } from "../claude/executor.js";
 
 const router = Router();
 
 router.get("/api/reconnect", (req, res) => {
-  // マルチセッション対応: X-Connection-Id が無い/不正な場合は400
-  const connectionId = getConnectionId(req, res);
-  if (!connectionId) {
-    res.status(400).json({ error: "X-Connection-Id header is required" });
+  // agentId/clientId分離対応: X-Client-Id が無い/不正な場合は400
+  const clientId = getClientId(req, res);
+  if (!clientId) {
+    res.status(400).json({ error: "X-Client-Id header is required" });
     return;
   }
 
-  const currentSessionExists = !!getSession(connectionId);
-  serverLog("RECONNECT_ATTEMPT", { connectionId, timestamp: new Date().toISOString(), currentSessionExists });
+  // 一覧APIはフェーズ3で追加する。それまでは名指し必須にする（欠落は400）。
+  const agentId = getAgentId(req);
+  if (!agentId) {
+    res.status(400).json({ error: "X-Agent-Id header is required" });
+    return;
+  }
 
-  const sub = subscribeToSession(connectionId);
+  serverLog("RECONNECT_ATTEMPT", { clientId, agentId, timestamp: new Date().toISOString() });
+
+  // 所有者チェックは subscribeOwnedSession に集約する。他clientIdのagentIdは
+  // 「存在しない」のと区別せず404にする（存在を秘匿するため403ではなく404）。
+  const sub = subscribeOwnedSession(clientId, agentId);
   if (!sub) {
-    serverLog("RECONNECT_NO_SESSION", { connectionId, currentSessionExists, message: "No active session found" });
+    serverLog("RECONNECT_NOT_FOUND", { clientId, agentId, message: "No owned session found" });
     res.status(404).json({ error: "No active session" });
     return;
   }
@@ -25,7 +33,8 @@ router.get("/api/reconnect", (req, res) => {
   const { session, addListener, unsubscribe } = sub;
 
   serverLog("RECONNECT_OK", {
-    connectionId,
+    clientId,
+    agentId,
     sessionId: session.sessionId,
     completed: session.completed,
     partsCount: session.assistantMessage.parts.length,
@@ -54,8 +63,14 @@ router.get("/api/reconnect", (req, res) => {
   // Send current state snapshot so the client can restore its UI
   send({
     type: "reconnect_state",
+    // P4-5: 復帰先リポジトリの照合用。フロントは現在表示中のrepoIdと一致しない場合、
+    // 「他Agentと混線させない」ため復帰を中止する（静かに諦める）。
+    repoId: session.repoId,
     sessionId: session.sessionId,
     assistantMessage: session.assistantMessage,
+    // P4-2根本対応: ユーザーの元発言を復帰時に画面へ復元するため、そのまま渡す。
+    // 取得できた場合はフロント側で「実行中だった会話を再開しました」の注記を不要にできる。
+    lastUserMessage: session.lastUserMessage,
     pendingPermission: session.pendingPermission,
     pendingQuestion: session.pendingQuestion,
     completed: session.completed,
@@ -95,7 +110,7 @@ router.get("/api/reconnect", (req, res) => {
   });
 
   req.on("close", () => {
-    serverLog("RECONNECT_CLIENT_DISCONNECT", { connectionId, sessionId: session.sessionId });
+    serverLog("RECONNECT_CLIENT_DISCONNECT", { clientId, agentId, sessionId: session.sessionId });
     connectionOpen = false;
     clearInterval(keepalive);
     unsubscribe();

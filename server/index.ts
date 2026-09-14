@@ -11,11 +11,12 @@ import statusRouter from "./routes/status.js";
 import chatRouter from "./routes/chat.js";
 import permissionRouter from "./routes/permission.js";
 import reconnectRouter from "./routes/reconnect.js";
+import agentsRouter from "./routes/agents.js";
 import sessionsRouter from "./routes/sessions.js";
 import filesRouter from "./routes/files.js";
 import gitRouter from "./routes/git.js";
 import modelsRouter from "./routes/models.js";
-import { prefetchModels, sanitizeConnectionId } from "./claude/executor.js";
+import { prefetchModels, sanitizeId } from "./claude/executor.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -25,12 +26,14 @@ const PORT = process.env.PORT ? parseInt(process.env.PORT) : 3000;
 app.use(cors());
 app.use(express.json({ limit: "20mb" }));
 
-// マルチセッション対応: HTTPヘッダ `X-Connection-Id`（タブ・端末ごとのUUID）を検証し res.locals に格納する。
-// このミドルウェア自体は 400 を返さない（connectionId を使わないルートもあるため）。
-// 実際に connectionId を要求するルート（chat/reconnect/permission/status）側で
-// res.locals.connectionId が null なら 400 を返す。
+// agentId/clientId分離対応（フェーズ2）: HTTPヘッダ `X-Client-Id`（ブラウザ単位・所有者のUUID）を
+// 検証し res.locals に格納する。このミドルウェア自体は 400 を返さない（clientId を使わない
+// ルートもあるため）。実際に clientId を要求するルート（chat/reconnect/permission/status/interrupt）側で
+// res.locals.clientId が null なら 400 を返す（ただし /api/status のみヘッダ無しを許容する）。
+// `X-Agent-Id` はここでは扱わない。省略可能なヘッダで必須/任意がルートごとに異なるため、
+// 各ルートが `getAgentId` でその都度ヘッダから読む。
 app.use((req, res, next) => {
-  res.locals.connectionId = sanitizeConnectionId(req.header("X-Connection-Id"));
+  res.locals.clientId = sanitizeId(req.header("X-Client-Id"));
   next();
 });
 
@@ -40,6 +43,7 @@ app.use(statusRouter);
 app.use(chatRouter);
 app.use(permissionRouter);
 app.use(reconnectRouter);
+app.use(agentsRouter);
 app.use(sessionsRouter);
 app.use(filesRouter);
 app.use(gitRouter);

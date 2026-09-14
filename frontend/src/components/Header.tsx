@@ -2,16 +2,18 @@ import { Box, Typography } from "@mui/material";
 import AddRoundedIcon from "@mui/icons-material/AddRounded";
 import RepoSelector from "./RepoSelector";
 import SessionHistory from "./SessionHistory";
+import AgentList from "./AgentList";
 
 interface Props {
   repoId: string;
   onRepoChange: (id: string) => void;
   onNewChat: () => void;
   onResumeSession: (sessionId: string) => void;
+  onResumeAgent: (repoId: string, agentId: string) => void;
   sessionId?: string | null;
 }
 
-export default function Header({ repoId, onRepoChange, onNewChat, onResumeSession }: Props) {
+export default function Header({ repoId, onRepoChange, onNewChat, onResumeSession, onResumeAgent }: Props) {
   return (
     <Box
       sx={(theme) => ({
@@ -76,6 +78,9 @@ export default function Header({ repoId, onRepoChange, onNewChat, onResumeSessio
       {repoId && (
         <SessionHistory repoId={repoId} onSelect={onResumeSession} />
       )}
+
+      {/* 実行中Agent一覧（バッジ+ポップオーバー） */}
+      <AgentList onResumeAgent={onResumeAgent} />
 
       {/* New Chat Button */}
       <Box

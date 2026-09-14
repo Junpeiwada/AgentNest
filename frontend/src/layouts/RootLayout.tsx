@@ -11,6 +11,10 @@ import { chatPath, chatSessionPath, filesPath, gitPath, repoNavPrefix, apiSessio
 interface ParentContext {
   newChatNonce: number;
   resumeSessionId: string | null;
+  // Agent一覧から選択された復帰先。{repoId, agentId}のペアで受け取り、
+  // このrepoIdが自分（useParamsのrepoId）と一致するまではresumeAgentIdとして
+  // 有効化しない（下記のバグ修正コメント参照）。
+  resumeAgent: { repoId: string; agentId: string } | null;
 }
 
 interface FetchedSession {
@@ -23,7 +27,30 @@ export default function RootLayout() {
   const location = useLocation();
   const { repo } = useParams<{ repo: string }>();
   const repoId = repo ?? "";
-  const { newChatNonce, resumeSessionId } = useOutletContext<ParentContext>();
+  const { newChatNonce, resumeSessionId, resumeAgent } = useOutletContext<ParentContext>();
+
+  // バグ修正: Header の Agent一覧から「現在表示中とは別のリポジトリ」のAgentを選んで
+  // 復帰しようとすると、静かに失敗していた。
+  //
+  // 原因: MinimalLayout.handleResumeAgent は同一イベント内で resumeAgentId のセットと
+  // navigate(chatPath(targetRepoId)) を呼ぶが、resumeAgentId は useOutletContext 経由
+  // （MinimalLayoutのstate、同期的に反映）で届く一方、この repoId は useParams()
+  // （React Routerのルート一致、navigate後の再レンダーまで古い値のまま）から取れるため、
+  // 両者の反映タイミングがずれる。その結果、下のchatKeyがresumeAgentId基準で先に変化して
+  // Chatが再マウントされる瞬間の repoId がまだ遷移前（古いリポジトリ）のままになり、
+  // useChat.ts の自動復帰effectが古いrepoIdをexpectedRepoIdとして/api/reconnectを呼び、
+  // サーバが返すreconnect_state.repoId（新リポジトリ）と食い違って「repoId不一致」の
+  // ガードに自分で引っかかり、復帰が握りつぶされていた
+  // （そのガード自体は「別リポジトリのAgentと混線しない」ための正しい挙動であり、
+  // 問題はマウントのタイミング側にあった）。
+  //
+  // 対策: resumeAgentをそのまま使わず、resumeAgent.repoIdが現在のrepoId（useParams由来、
+  // navigate後に追いつく値）と一致する場合のみ有効なresumeAgentIdとして扱う。
+  // 不一致の間はresumeAgentIdをnullのまま維持するため、chatKeyもagentId基準に
+  // 切り替わらず、古いrepoIdのままChatが再マウントされることがない。
+  // repoIdが追いついた次のレンダーで一致し、そこで初めてresumeAgentIdが有効になり
+  // Chatが正しいrepoId・agentIdの組で再マウントされる。
+  const resumeAgentId = resumeAgent && resumeAgent.repoId === repoId ? resumeAgent.agentId : null;
 
   const isFilesTab = location.pathname.includes("/files");
   const isGitTab = location.pathname.includes("/git");
@@ -75,9 +102,19 @@ export default function RootLayout() {
   const chatReady = !resumeSessionId || fetchedSession?.sessionId === resumeSessionId;
   // chatKey: resumeSessionId自体を使い、fetchの完了/未完了でキーが変わらないようにする
   // （"loading" → 実IDへの変化でChatが再マウントされSSE接続が切断されるのを防ぐ）
+  // resumeAgentId（上でrepoId一致確認済みの復帰先。上のコメント参照）が指定された
+  // 場合もキーに含め、同じリポジトリ内での選択であっても確実にChatを再マウントして
+  // useChatの自動復帰effect（マウント時に一度だけ動く）を起動させる。
+  // resumeAgentIdはrepoIdと一致した場合のみ非nullになるため、ここで改めてrepoIdを
+  // キーに含めなくても、有効化された時点のrepoIdは常に現在のものと一致している。
+  // newChatNonceも併せて含める: MinimalLayoutのhandleResumeAgentは選択のたびに
+  // newChatNonceもインクリメントするため、同じagentIdを続けて選び直した場合でも
+  // （resumeAgentId自体は変わらなくても）chatKeyが変わり確実に再マウントされる。
   const chatKey = resumeSessionId
     ? `session:${resumeSessionId}`
-    : `new:${repoId}:${newChatNonce}`;
+    : resumeAgentId
+      ? `agent:${resumeAgentId}:${newChatNonce}`
+      : `new:${repoId}:${newChatNonce}`;
 
   // --- Tabs ---
   const tabs = [
@@ -158,6 +195,7 @@ export default function RootLayout() {
             }}
             initialMessages={initialMessages}
             initialSessionId={initialSessionId}
+            initialAgentId={resumeAgentId}
           />
         )}
       </Box>
