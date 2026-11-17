@@ -33,14 +33,22 @@ export default function SessionHistory({ repoId, onSelect }: Props) {
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
   const [fetchError, setFetchError] = useState(false);
+  // 一覧の取得が済んだリポジトリ。開いているのに未取得なら「読み込み中…」を出し、
+  // 「No sessions」と区別する（会話が多いと数秒かかる）
+  const [loadedRepo, setLoadedRepo] = useState<string | null>(null);
+  const loading = open && loadedRepo !== repoId;
   const ref = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (!repoId || !open) return;
+    // リポジトリ切り替え後に古い応答が届いても反映しない
+    let cancelled = false;
     fetch(apiSessionsPath(repoId))
       .then((r) => { if (!r.ok) throw new Error(); return r.json(); })
-      .then((data) => { setSessions(data); setFetchError(false); })
-      .catch(() => { setSessions([]); setFetchError(true); });
+      .then((data) => { if (!cancelled) { setSessions(data); setFetchError(false); } })
+      .catch(() => { if (!cancelled) { setSessions([]); setFetchError(true); } })
+      .finally(() => { if (!cancelled) setLoadedRepo(repoId); });
+    return () => { cancelled = true; };
   }, [repoId, open]);
 
   useEffect(() => {
@@ -65,7 +73,11 @@ export default function SessionHistory({ repoId, onSelect }: Props) {
     <Box ref={ref} sx={{ position: "relative" }}>
       {/* Trigger button */}
       <Box
-        onClick={() => setOpen(!open)}
+        onClick={() => {
+          // 開くたびに取り直すので、取得済みの印を消して「読み込み中…」に戻す
+          if (!open) setLoadedRepo(null);
+          setOpen(!open);
+        }}
         sx={(theme) => ({
           display: "flex",
           alignItems: "center",
@@ -150,7 +162,7 @@ export default function SessionHistory({ repoId, onSelect }: Props) {
                   py: 3,
                 })}
               >
-                {fetchError ? "サーバーに接続できません" : sessions.length === 0 ? "No sessions" : "No results"}
+                {loading ? "読み込み中…" : fetchError ? "サーバーに接続できません" : sessions.length === 0 ? "No sessions" : "No results"}
               </Typography>
             ) : (
               filtered.map((s) => (

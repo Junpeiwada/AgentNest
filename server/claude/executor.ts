@@ -1094,6 +1094,10 @@ async function runQuery(
   delete cleanEnv.NODE_OPTIONS;
   delete cleanEnv.NODE_DEBUG_OPTION;
   delete cleanEnv.VSCODE_INSPECTOR_OPTIONS;
+  // 会話ファイルに記録される「どこから作られたか」の印。SDK 既定の "sdk-ts" だと、
+  // VSCode・ターミナルの履歴一覧（/resume）から外されてしまうため、独自の値にする。
+  // 判定は会話ファイル最初の行の印だけを見る。"cli" は CLI が "sdk-cli" に書き換えるので使えない。
+  cleanEnv.CLAUDE_CODE_ENTRYPOINT = "agentnest";
 
   const prompt = images?.length
     ? createImagePrompt(message, images)

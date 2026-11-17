@@ -1,5 +1,6 @@
 import { Router } from "express";
-import { readdir, readFile, stat } from "fs/promises";
+import { readFile } from "fs/promises";
+import { listSessions } from "@anthropic-ai/claude-agent-sdk";
 import { join } from "path";
 import { homedir } from "os";
 import { BASE_DIR } from "../config.js";
@@ -8,100 +9,48 @@ import { stringifyToolResultContent, imagePathFromToolInput } from "../claude/to
 const router = Router();
 const CLAUDE_DIR = join(homedir(), ".claude", "projects");
 
-/** Convert a repo path to the Claude Code session directory name */
+/**
+ * リポジトリのパスを Claude Code の履歴フォルダ名に変換する。
+ * Claude Code は英数字以外（"/" "_" "." 日本語など）をすべて "-" に置き換える。
+ * 例: /path/to/PID_AIRDEPOT → -path-to-PID-AIRDEPOT
+ */
 function encodeProjectPath(repoPath: string): string {
-  // e.g. /path/to/projects/AgentNest → -path-to-projects-AgentNest
-  return repoPath.replace(/\//g, "-");
+  return repoPath.replace(/[^a-zA-Z0-9]/g, "-");
 }
 
 interface SessionInfo {
   sessionId: string;
   title: string;
   firstMessage: string;
+  /** 最終更新時刻（ISO 8601）。一覧はこの新しい順に並ぶ */
   timestamp: string;
 }
 
-/** Extract session metadata from a JSONL file (reads only what's needed) */
-async function parseSessionMeta(filePath: string): Promise<{
-  title: string;
-  firstMessage: string;
-  timestamp: string;
-} | null> {
-  try {
-    const content = await readFile(filePath, "utf-8");
-    const lines = content.split("\n");
-
-    let title = "";
-    let firstMessage = "";
-    let timestamp = "";
-
-    for (const line of lines) {
-      if (!line.trim()) continue;
-      try {
-        const obj = JSON.parse(line);
-
-        if (obj.type === "ai-title" && obj.aiTitle) {
-          title = obj.aiTitle;
-        }
-
-        if (obj.type === "user" && !firstMessage) {
-          timestamp = obj.timestamp ?? "";
-          const content = obj.message?.content;
-          if (Array.isArray(content)) {
-            // Extract last text block (skip IDE context tags)
-            const texts = content
-              .filter((b: any) => b.type === "text" && typeof b.text === "string")
-              .map((b: any) => b.text as string)
-              .filter((t: string) => !t.startsWith("<ide_"));
-            firstMessage = (texts[texts.length - 1] ?? texts[0] ?? "").slice(0, 120);
-          }
-        }
-
-        // Once we have both, stop early
-        if (title && firstMessage) break;
-      } catch {}
-    }
-
-    if (!firstMessage && !title) return null;
-    return { title, firstMessage, timestamp };
-  } catch {
-    return null;
-  }
-}
-
-/** GET /api/sessions/:repoId — list sessions for a repo */
+/**
+ * GET /api/sessions/:repoId — list sessions for a repo
+ *
+ * SDK の listSessions に任せる。各 JSONL の先頭と末尾だけを読むので、会話が大きくても速い。
+ * フォルダ名の変換・タイトルの決定・最終更新順の並べ替えも SDK 側で行われる。
+ * VSCode・CLI・AgentNest（SDK）のどれで作った会話も含まれる。
+ */
 router.get("/api/sessions/:repoId", async (req, res) => {
   const { repoId } = req.params;
   const repoPath = `${BASE_DIR}/${repoId}`;
-  const projectDir = join(CLAUDE_DIR, encodeProjectPath(repoPath));
 
   try {
-    const files = await readdir(projectDir).catch(() => [] as string[]);
-    const jsonlFiles = files.filter((f) => f.endsWith(".jsonl"));
+    // worktree 側の会話は cwd が違い AgentNest から引き継げないので含めない
+    const list = await listSessions({ dir: repoPath, includeWorktrees: false });
 
-    const sessions: SessionInfo[] = [];
-
-    await Promise.all(
-      jsonlFiles.map(async (file) => {
-        const sessionId = file.replace(".jsonl", "");
-        const filePath = join(projectDir, file);
-        const meta = await parseSessionMeta(filePath);
-        if (meta) {
-          sessions.push({
-            sessionId,
-            title: meta.title,
-            firstMessage: meta.firstMessage,
-            timestamp: meta.timestamp,
-          });
-        }
-      })
-    );
-
-    // Sort by timestamp descending (most recent first)
-    sessions.sort((a, b) => {
-      if (!a.timestamp) return 1;
-      if (!b.timestamp) return -1;
-      return b.timestamp.localeCompare(a.timestamp);
+    const sessions: SessionInfo[] = list.map((s) => {
+      const firstMessage = (s.firstPrompt ?? "").slice(0, 120);
+      const title = s.customTitle ?? s.summary ?? "";
+      return {
+        sessionId: s.sessionId,
+        // タイトルが最初の発言そのものなら 2 行に同じ文が並ぶので、タイトルは空にする
+        title: title === s.firstPrompt ? "" : title,
+        firstMessage,
+        timestamp: new Date(s.lastModified).toISOString(),
+      };
     });
 
     res.json(sessions);
